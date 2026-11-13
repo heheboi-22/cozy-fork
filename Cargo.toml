@@ -50,6 +50,45 @@ tree-sitter-toml-ng = { version = "0.7", optional = true }
 tree-sitter-typescript = { version = "0.23", optional = true }
 tree-sitter-go = { version = "0.23", optional = true }
 tree-sitter-md = { version = "0.5", features = ["parser"], optional = true }
+# Grammars from the arborium family: one uniform API (`language()` + a query const),
+# which is what makes 30-odd languages affordable here. They only need
+# `tree-sitter-language`, so they plug into our `tree-sitter` without a version dance.
+arborium-bash = { version = "2", optional = true }
+arborium-c = { version = "2", optional = true }
+arborium-c-sharp = { version = "2", optional = true }
+arborium-cmake = { version = "2", optional = true }
+arborium-cpp = { version = "2", optional = true }
+arborium-css = { version = "2", optional = true }
+arborium-dart = { version = "2", optional = true }
+arborium-diff = { version = "2", optional = true }
+arborium-dockerfile = { version = "2", optional = true }
+arborium-elixir = { version = "2", optional = true }
+arborium-erlang = { version = "2", optional = true }
+arborium-fish = { version = "2", optional = true }
+arborium-gitattributes = { version = "2", optional = true }
+arborium-graphql = { version = "2", optional = true }
+arborium-haskell = { version = "2", optional = true }
+arborium-hcl = { version = "2", optional = true }
+arborium-html = { version = "2", optional = true }
+arborium-ini = { version = "2", optional = true }
+arborium-java = { version = "2", optional = true }
+arborium-just = { version = "2", optional = true }
+arborium-kotlin = { version = "2", optional = true }
+arborium-lua = { version = "2", optional = true }
+arborium-make = { version = "2", optional = true }
+arborium-nix = { version = "2", optional = true }
+arborium-php = { version = "2", optional = true }
+arborium-powershell = { version = "2", optional = true }
+arborium-proto = { version = "2", optional = true }
+arborium-ruby = { version = "2", optional = true }
+arborium-scss = { version = "2", optional = true }
+arborium-sql = { version = "2", optional = true }
+arborium-ssh-config = { version = "2", optional = true }
+arborium-swift = { version = "2", optional = true }
+arborium-vim = { version = "2", optional = true }
+arborium-xml = { version = "2", optional = true }
+arborium-yaml = { version = "2", optional = true }
+arborium-zig = { version = "2", optional = true }
 atomicwrites = "0.4.4"
 # 端末内画像ビューア（`#20` Phase 1・feature `imageview`）。
 # 🚚 2026-10-03 に [dev-dependencies]（PoC 専用）から昇格。
@@ -108,6 +147,42 @@ treesitter = [
     "dep:tree-sitter-typescript",
     "dep:tree-sitter-go",
     "dep:tree-sitter-md",
+    "dep:arborium-bash",
+    "dep:arborium-c",
+    "dep:arborium-c-sharp",
+    "dep:arborium-cmake",
+    "dep:arborium-cpp",
+    "dep:arborium-css",
+    "dep:arborium-dart",
+    "dep:arborium-diff",
+    "dep:arborium-dockerfile",
+    "dep:arborium-elixir",
+    "dep:arborium-erlang",
+    "dep:arborium-fish",
+    "dep:arborium-gitattributes",
+    "dep:arborium-graphql",
+    "dep:arborium-haskell",
+    "dep:arborium-hcl",
+    "dep:arborium-html",
+    "dep:arborium-ini",
+    "dep:arborium-java",
+    "dep:arborium-just",
+    "dep:arborium-kotlin",
+    "dep:arborium-lua",
+    "dep:arborium-make",
+    "dep:arborium-nix",
+    "dep:arborium-php",
+    "dep:arborium-powershell",
+    "dep:arborium-proto",
+    "dep:arborium-ruby",
+    "dep:arborium-scss",
+    "dep:arborium-sql",
+    "dep:arborium-ssh-config",
+    "dep:arborium-swift",
+    "dep:arborium-vim",
+    "dep:arborium-xml",
+    "dep:arborium-yaml",
+    "dep:arborium-zig",
 ]
 
 [lib]

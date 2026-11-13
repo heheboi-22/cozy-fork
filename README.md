@@ -64,7 +64,12 @@ cozy <folder>
 - File open/save/save-as, unsaved-change prompts, and folder browsing
 - Search and replace with literal, case-sensitive, word-boundary, and regex modes
 - Undo/redo, line cut, clipboard paste, line numbers, line wrap, and goto-line
-- Tree-sitter syntax highlighting for Rust, Python, JavaScript, TypeScript, Go, JSON, TOML, and Markdown
+- Tree-sitter syntax highlighting for ~45 languages and file kinds — Rust, Python,
+  JavaScript/TypeScript/TSX, Go, C, C++, C#, Java, Kotlin, Swift, Dart, Haskell, Zig, Nix,
+  HCL/Terraform, Lua, Ruby, PHP, Elixir, Erlang, SQL, HTML, XML, CSS/SCSS,
+  YAML, JSON, TOML, INI (`nginx.conf`, `.env`, systemd units), Make, CMake, Just,
+  Dockerfile, `diff`/`patch`, `.gitignore`-style files, `~/.ssh/config`, PowerShell, Vim,
+  Markdown (and Markdown preview)
 - Markdown preview, including Mermaid diagram blocks (rendering code from `ratatui-markdown`)
 - Fast reading controls in Markdown preview
 - Glide mode for vim-like movement, operators, yanking, changing, deleting, joining, and paste

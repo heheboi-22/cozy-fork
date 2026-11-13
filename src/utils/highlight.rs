@@ -39,6 +39,92 @@ impl Default for Highlighter {
     }
 }
 
+/// Which language a file is highlighted as.
+///
+/// ⭐ The extension is not enough: `Dockerfile`, `Makefile`, `CMakeLists.txt`, `Justfile`
+/// and `.gitignore` carry their language in the *name*, and they are exactly the files
+/// people open without a suffix. The key is also the identity used for the parse cache,
+/// so `*.yml` and `*.yaml` share one engine.
+fn language_key(path: &Path) -> Option<String> {
+    let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
+    let key = match name.as_str() {
+        "dockerfile" | "containerfile" => "dockerfile",
+        "makefile" | "gnumakefile" | "bsdmakefile" => "make",
+        "cmakelists.txt" => "cmake",
+        "justfile" => "just",
+        "cargo.lock" => "toml",
+        ".gitignore" | ".gitattributes" | ".gitmodules" | ".dockerignore" | ".npmignore"
+        | ".eslintignore" | ".prettierignore" => "gitattributes",
+        _ if name.starts_with("dockerfile.") || name.ends_with(".dockerfile") => "dockerfile",
+        _ if name.starts_with("makefile.") => "make",
+        _ if name.starts_with(".env") => "ini",
+        _ if name == "config"
+            && path
+                .parent()
+                .and_then(|p| p.file_name())
+                .is_some_and(|d| d == ".ssh") =>
+        {
+            "ssh-config"
+        }
+        _ => "",
+    };
+    if !key.is_empty() {
+        return Some(key.to_string());
+    }
+
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    let key = match ext.as_str() {
+        // Built-in grammars (the ones that shipped before the arborium set).
+        "rs" => "rs",
+        "py" | "pyi" => "py",
+        "js" | "mjs" | "cjs" | "jsx" => "js",
+        "ts" | "mts" | "cts" => "ts",
+        "tsx" => "tsx",
+        "go" => "go",
+        "json" | "jsonc" | "json5" => "json",
+        "toml" => "toml",
+        "md" | "markdown" | "mdx" => "md",
+        // Shell.
+        "sh" | "bash" | "zsh" | "ksh" | "bashrc" | "zshrc" | "profile" => "bash",
+        "fish" => "fish",
+        // Compiled languages.
+        "c" | "h" => "c",
+        "cc" | "cpp" | "cxx" | "hpp" | "hh" | "hxx" | "ipp" | "c++" => "cpp",
+        "cs" => "c-sharp",
+        "java" => "java",
+        "kt" | "kts" => "kotlin",
+        "swift" => "swift",
+        "dart" => "dart",
+        "hs" | "lhs" => "haskell",
+        "zig" => "zig",
+        "nix" => "nix",
+        "hcl" | "tf" | "tfvars" | "nomad" => "hcl",
+        "lua" => "lua",
+        "rb" | "rake" | "gemspec" | "ru" => "ruby",
+        "php" | "phtml" => "php",
+        "ex" | "exs" => "elixir",
+        "erl" | "hrl" => "erlang",
+        // Web.
+        "css" => "css",
+        "scss" | "sass" => "scss",
+        "html" | "htm" | "xhtml" => "html",
+        "xml" | "xsl" | "xslt" | "svg" | "plist" | "csproj" | "props" | "targets" => "xml",
+        "sql" => "sql",
+        "proto" => "proto",
+        "graphql" | "gql" => "graphql",
+        // Config and build files.
+        "yml" | "yaml" => "yaml",
+        "ini" | "cfg" | "conf" | "properties" | "service" | "socket" | "timer" | "env" => "ini",
+        "mk" => "make",
+        "cmake" => "cmake",
+        "diff" | "patch" => "diff",
+        "ps1" | "psm1" | "psd1" => "powershell",
+        "vim" => "vim",
+        _ => return None,
+    };
+    Some(key.to_string())
+}
+
 impl Highlighter {
     pub fn new() -> Self {
         Self::default()
@@ -46,12 +132,9 @@ impl Highlighter {
 
     /// Resolve the language from a file path. Cheap; safe to call on every open.
     pub fn set_file(&mut self, path: Option<&Path>) {
-        let ext = path
-            .and_then(|p| p.extension())
-            .and_then(|e| e.to_str())
-            .map(|s| s.to_ascii_lowercase());
-        if ext != self.ext {
-            self.ext = ext;
+        let key = path.and_then(language_key);
+        if key != self.ext {
+            self.ext = key;
             #[cfg(feature = "treesitter")]
             self.ts.set_language(self.ext.as_deref());
         }
@@ -125,6 +208,121 @@ fn regex_line_spans(hl: &super::syntax::SyntaxHighlighter, line: &str) -> LineSp
         pos += len;
     }
     spans
+}
+
+#[cfg(all(test, feature = "treesitter"))]
+mod coverage_tests {
+    use super::*;
+
+    /// One small file per language: `(key, source)`. The key is what `language_key`
+    /// produces, so this also pins the mapping between file names and grammars.
+    const SAMPLES: &[(&str, &str)] = &[
+        ("dockerfile", "FROM alpine AS build\nRUN echo hi\n"),
+        ("yaml", "key: value\n# comment\n"),
+        ("bash", "echo hi # comment\n"),
+        ("fish", "set x 1\n"),
+        ("c", "int main(void) { return 0; }\n"),
+        ("cpp", "class A { int x; };\n"),
+        ("c-sharp", "public class A { int x = 1; }\n"),
+        ("java", "public class A { int x = 1; }\n"),
+        ("kotlin", "fun main() { val x = 1 }\n"),
+        ("swift", "let x = 1\nfunc f() {}\n"),
+        ("dart", "void main() { var x = 1; }\n"),
+        ("haskell", "main :: IO ()\nmain = putStrLn \"hi\"\n"),
+        ("zig", "const x: i32 = 1;\n"),
+        ("nix", "{ pkgs }: pkgs.hello\n"),
+        ("hcl", "resource \"x\" \"y\" { a = 1 }\n"),
+        ("lua", "local x = 1 -- comment\n"),
+        ("ruby", "def f; 1; end\n"),
+        ("php", "<?php $x = 1;\n"),
+        ("ex", "defmodule A do\n  def x, do: 1\nend\n"),
+        ("erl", "-module(a).\n"),
+        ("css", "a { color: red; }\n"),
+        ("scss", "$x: 1;\na { color: $x; }\n"),
+        ("html", "<p class=\"a\">hi</p>\n"),
+        ("xml", "<a b=\"c\"/>\n"),
+        ("sql", "SELECT 1;\n"),
+        ("proto", "message A { string b = 1; }\n"),
+        ("graphql", "type A { b: String }\n"),
+        ("ini", "[section]\nkey = value\n"),
+        ("make", "all:\n\techo hi\n"),
+        ("cmake", "project(a)\n"),
+        ("just", "build:\n  echo hi\n"),
+        ("diff", "--- a\n+++ b\n@@ -1 +1 @@\n-a\n+b\n"),
+        ("gitattributes", "*.rs text\n"),
+        ("ssh-config", "Host foo\n  User bar\n"),
+        ("powershell", "Write-Host \"hi\"\n"),
+        ("vim", "let g:x = 1\n"),
+        // The pre-arborium set, so one table covers what the editor advertises.
+        ("rs", "fn main() { let x = 1; }\n"),
+        ("py", "def f():\n    return 1\n"),
+        ("js", "function f() { return 1; }\n"),
+        ("ts", "const x: number = 1;\n"),
+        ("tsx", "const x = <a/>;\n"),
+        ("go", "package main\nfunc main() {}\n"),
+        ("json", "{\"a\": 1}\n"),
+        ("toml", "a = 1\n"),
+        ("md", "# Heading\n\ntext **bold**\n"),
+    ];
+
+    /// Parse the sample and collect the spans the engine produced.
+    fn spans(key: &str, source: &str) -> Vec<(usize, usize, Style)> {
+        let lines: Vec<String> = source.lines().map(|l| l.to_string()).collect();
+        let mut backend = ts::TsBackend::new();
+        backend.set_language(Some(key));
+        backend.reparse(&lines);
+        let mut out = HashMap::new();
+        backend.spans_for(&lines, &(0..lines.len()), &mut out);
+        out.into_values().flatten().collect()
+    }
+
+    /// 🚨 **Every advertised language colours its own text.** A missing grammar, a query
+    /// that fails to compile, or an unmapped capture all end here — the editor used to
+    /// say "no highlighter for this file" for everything outside nine languages.
+    #[test]
+    fn every_language_produces_coloured_spans() {
+        let mut broken = Vec::new();
+        for (key, source) in SAMPLES {
+            let spans = spans(key, source);
+            let coloured = spans
+                .iter()
+                .filter(|(s, e, style)| e > s && *style != Style::default())
+                .count();
+            if coloured == 0 {
+                broken.push(*key);
+            }
+        }
+        assert!(broken.is_empty(), "tidak ada warna untuk: {broken:?}");
+    }
+
+    /// The file-name rules: the languages people open without an extension.
+    #[test]
+    fn names_carry_their_own_language() {
+        let cases = [
+            ("/w/Dockerfile", "dockerfile"),
+            ("/w/Dockerfile.dev", "dockerfile"),
+            ("/w/app.dockerfile", "dockerfile"),
+            ("/w/Makefile", "make"),
+            ("/w/CMakeLists.txt", "cmake"),
+            ("/w/Justfile", "just"),
+            ("/w/deploy/docker-compose.yml", "yaml"),
+            ("/w/.gitignore", "gitattributes"),
+            ("/w/.dockerignore", "gitattributes"),
+            ("/w/.env", "ini"),
+            ("/w/.env.example", "ini"),
+            ("/w/deploy/nginx.conf", "ini"),
+            ("/w/systemd/app.service", "ini"),
+            ("/home/u/.ssh/config", "ssh-config"),
+            ("/w/scripts/build.sh", "bash"),
+            ("/w/main.tf", "hcl"),
+            ("/w/Cargo.lock", "toml"),
+            ("/w/unknown.xyz", ""),
+        ];
+        for (path, want) in cases {
+            let got = language_key(std::path::Path::new(path));
+            assert_eq!(got.as_deref().unwrap_or(""), want, "language_key({path})");
+        }
+    }
 }
 
 #[cfg(all(test, feature = "treesitter"))]
@@ -532,8 +730,83 @@ mod ts {
                 tree_sitter_toml_ng::LANGUAGE.into(),
                 tree_sitter_toml_ng::HIGHLIGHTS_QUERY.to_string(),
             ),
+            // Everything below comes from the arborium family: one shape
+            // (`language()` + `HIGHLIGHTS_QUERY`), so a language is one line here and
+            // one dependency in `Cargo.toml`. No LSP, no configuration — the grammar
+            // only colours the text.
+            "bash" => arb(arborium_bash::language(), arborium_bash::HIGHLIGHTS_QUERY),
+            "fish" => arb(arborium_fish::language(), arborium_fish::HIGHLIGHTS_QUERY),
+            "c" => arb(arborium_c::language(), arborium_c::HIGHLIGHTS_QUERY),
+            "cpp" => arb(arborium_cpp::language(), &*arborium_cpp::HIGHLIGHTS_QUERY),
+            "c-sharp" => arb(
+                arborium_c_sharp::language(),
+                arborium_c_sharp::HIGHLIGHTS_QUERY,
+            ),
+            "java" => arb(arborium_java::language(), arborium_java::HIGHLIGHTS_QUERY),
+            "kotlin" => arb(
+                arborium_kotlin::language(),
+                arborium_kotlin::HIGHLIGHTS_QUERY,
+            ),
+            "swift" => arb(arborium_swift::language(), arborium_swift::HIGHLIGHTS_QUERY),
+            "dart" => arb(arborium_dart::language(), arborium_dart::HIGHLIGHTS_QUERY),
+            "haskell" => arb(
+                arborium_haskell::language(),
+                arborium_haskell::HIGHLIGHTS_QUERY,
+            ),
+            "zig" => arb(arborium_zig::language(), arborium_zig::HIGHLIGHTS_QUERY),
+            "nix" => arb(arborium_nix::language(), arborium_nix::HIGHLIGHTS_QUERY),
+            "hcl" => arb(arborium_hcl::language(), arborium_hcl::HIGHLIGHTS_QUERY),
+            "lua" => arb(arborium_lua::language(), arborium_lua::HIGHLIGHTS_QUERY),
+            "ruby" => arb(arborium_ruby::language(), arborium_ruby::HIGHLIGHTS_QUERY),
+            "php" => arb(arborium_php::language(), arborium_php::HIGHLIGHTS_QUERY),
+            "ex" => arb(
+                arborium_elixir::language(),
+                arborium_elixir::HIGHLIGHTS_QUERY,
+            ),
+            "erl" => arb(
+                arborium_erlang::language(),
+                arborium_erlang::HIGHLIGHTS_QUERY,
+            ),
+            "css" => arb(arborium_css::language(), arborium_css::HIGHLIGHTS_QUERY),
+            "scss" => arb(arborium_scss::language(), &*arborium_scss::HIGHLIGHTS_QUERY),
+            "html" => arb(arborium_html::language(), arborium_html::HIGHLIGHTS_QUERY),
+            "xml" => arb(arborium_xml::language(), arborium_xml::HIGHLIGHTS_QUERY),
+            "sql" => arb(arborium_sql::language(), arborium_sql::HIGHLIGHTS_QUERY),
+            "proto" => arb(arborium_proto::language(), arborium_proto::HIGHLIGHTS_QUERY),
+            "graphql" => arb(
+                arborium_graphql::language(),
+                arborium_graphql::HIGHLIGHTS_QUERY,
+            ),
+            "yaml" => arb(arborium_yaml::language(), arborium_yaml::HIGHLIGHTS_QUERY),
+            "ini" => arb(arborium_ini::language(), arborium_ini::HIGHLIGHTS_QUERY),
+            "make" => arb(arborium_make::language(), arborium_make::HIGHLIGHTS_QUERY),
+            "cmake" => arb(arborium_cmake::language(), arborium_cmake::HIGHLIGHTS_QUERY),
+            "just" => arb(arborium_just::language(), arborium_just::HIGHLIGHTS_QUERY),
+            "diff" => arb(arborium_diff::language(), arborium_diff::HIGHLIGHTS_QUERY),
+            "dockerfile" => arb(
+                arborium_dockerfile::language(),
+                arborium_dockerfile::HIGHLIGHTS_QUERY,
+            ),
+            "gitattributes" => arb(
+                arborium_gitattributes::language(),
+                arborium_gitattributes::HIGHLIGHTS_QUERY,
+            ),
+            "ssh-config" => arb(
+                arborium_ssh_config::language(),
+                arborium_ssh_config::HIGHLIGHTS_QUERY,
+            ),
+            "powershell" => arb(
+                arborium_powershell::language(),
+                arborium_powershell::HIGHLIGHTS_QUERY,
+            ),
+            "vim" => arb(arborium_vim::language(), arborium_vim::HIGHLIGHTS_QUERY),
             _ => return None,
         })
+    }
+
+    /// One arborium grammar as the engine's `(language, query)` pair.
+    fn arb(language: impl Into<Language>, query: impl AsRef<str>) -> (Language, String) {
+        (language.into(), query.as_ref().to_string())
     }
 
     fn typescript_query() -> String {
@@ -605,8 +878,16 @@ mod ts {
             "number" | "float" | "constant" | "boolean" => Style::default().fg(Color::Yellow),
             // LightBlue, not Blue: plain ANSI blue is too dark to read on a dark
             // background (it looks unhighlighted / "white").
-            "function" => Style::default().fg(Color::LightBlue),
-            "property" | "attribute" => Style::default().fg(Color::Cyan),
+            "function" | "method" | "builtin" => Style::default().fg(Color::LightBlue),
+            "property" | "attribute" | "field" | "namespace" | "module" => {
+                Style::default().fg(Color::Cyan)
+            }
+            // HTML/XML element names read as keywords, which is what they are.
+            "tag" => Style::default().fg(Color::Magenta),
+            // Goto labels, YAML anchors, `@label` in asm-ish grammars.
+            "label" => Style::default().fg(Color::Yellow),
+            // `\n`, `\t` inside a string: still a string, but worth spotting.
+            "escape" => Style::default().fg(Color::Yellow),
             _ => Style::default(),
         }
     }
