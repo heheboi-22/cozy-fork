@@ -56,6 +56,10 @@ pub fn map_event(editor: &EditorState, event: Event) -> InputEvent {
             MouseEventKind::ScrollDown => {
                 InputEvent::Action(Action::MouseScroll(WHEEL_LINES, mouse.column, mouse.row))
             }
+            // Horizontal wheel / trackpad swipe. Over the panel it is ignored; in the
+            // buffer it scrolls the view sideways (soft wrap must be off).
+            MouseEventKind::ScrollLeft => InputEvent::Action(Action::HScroll(-WHEEL_LINES)),
+            MouseEventKind::ScrollRight => InputEvent::Action(Action::HScroll(WHEEL_LINES)),
             MouseEventKind::ScrollUp => {
                 InputEvent::Action(Action::MouseScroll(-WHEEL_LINES, mouse.column, mouse.row))
             }

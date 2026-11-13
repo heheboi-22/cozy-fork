@@ -272,6 +272,9 @@ pub struct EditorState {
     /// `adjust_scroll` leaves the offset alone — the view stays where the wheel put it
     /// until the next keypress asks for the cursor back.
     pub scroll_parked: bool,
+    /// Columns scrolled off to the left. Only meaningful with soft wrap **off**: a wrapped
+    /// line has nothing to scroll horizontally, so the offset is held at 0 there.
+    pub scroll_x: usize,
 }
 
 pub(crate) struct EditorStateInit {
@@ -534,6 +537,7 @@ impl EditorState {
             sidebar_drag: false,
             file_diff: None,
             scroll_parked: false,
+            scroll_x: 0,
         }
         .with_recovery_offer()
         // ⭐ 設定の苦情も**画面へ**（`eprintln!` は TUI の絵を壊す・`#2`）。
@@ -779,8 +783,52 @@ impl EditorState {
         let result = crate::file_io::open_file(self, path);
         if result.is_ok() {
             self.highlighter.set_file(self.filename.as_deref());
+            // A new document starts at column 0 — the old offset means nothing here.
+            self.scroll_x = 0;
         }
         result
+    }
+
+    /// Keep the cursor's column on screen when the view is scrolled horizontally. Called
+    /// by the renderer after [`Self::adjust_scroll`] (only it knows the text width).
+    ///
+    /// With soft wrap on there is no horizontal overflow, so this only clears the offset.
+    pub fn adjust_hscroll(&mut self) {
+        if self.soft_wrap || self.text_display_width == 0 {
+            self.scroll_x = 0;
+            return;
+        }
+        if self.scroll_parked {
+            return;
+        }
+        let Some(line) = self.buffer.lines.get(self.cursor.y) else {
+            self.scroll_x = 0;
+            return;
+        };
+        let width = self.text_display_width;
+        let col = crate::utils::unicode::str_display_width(&line[..self.cursor.x.min(line.len())]);
+        let line_width = crate::utils::unicode::str_display_width(line);
+        let max = line_width.saturating_sub(width);
+        if col < self.scroll_x {
+            self.scroll_x = col;
+        } else if col >= self.scroll_x + width {
+            self.scroll_x = col + 1 - width;
+        }
+        self.scroll_x = self.scroll_x.min(max);
+    }
+
+    /// The furthest column this window can be scrolled to (the widest visible line).
+    pub fn max_scroll_x(&self) -> usize {
+        if self.soft_wrap || self.text_display_width == 0 {
+            return 0;
+        }
+        let end = (self.scroll_offset + self.page_size.max(1)).min(self.buffer.lines.len());
+        self.buffer.lines[self.scroll_offset.min(end)..end]
+            .iter()
+            .map(|l| crate::utils::unicode::str_display_width(l))
+            .max()
+            .unwrap_or(0)
+            .saturating_sub(self.text_display_width)
     }
 
     pub fn adjust_scroll(&mut self, viewport_height: usize) {

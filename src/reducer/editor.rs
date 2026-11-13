@@ -397,6 +397,10 @@ pub fn apply_editor_event(editor: &mut EditorState, action: &Action) -> EventRes
         }
         Action::ToggleWrap => {
             editor.soft_wrap = !editor.soft_wrap;
+            if editor.soft_wrap {
+                // Wrapped lines have no horizontal overflow to show.
+                editor.scroll_x = 0;
+            }
             let status = if editor.soft_wrap { "on" } else { "off" };
             crate::reducer::status::set_info(editor, &format!("Soft wrap: {}", status));
             EventResult::Continue

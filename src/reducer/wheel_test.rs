@@ -260,3 +260,83 @@ fn outside_the_preview_nothing_is_fetched() {
     reduce(&mut editor, Action::FetchRemoteImages);
     assert_eq!(crate::imageview::fetch::status(&url), None);
 }
+
+// ── horizontal ───────────────────────────────────────────────────────────────
+
+/// Horizontal wheel with wrap off moves the window, not the cursor.
+#[test]
+fn a_horizontal_wheel_scrolls_the_window() {
+    let mut editor = EditorState::new(None);
+    editor.buffer = TextBuffer::from_lines(vec!["x".repeat(200)]);
+    editor.text_display_width = 80;
+    editor.page_size = 10;
+    editor.soft_wrap = false;
+    editor.enter_mode(EditorMode::Edit);
+
+    reduce(&mut editor, Action::HScroll(10));
+    assert_eq!(editor.scroll_x, 10);
+    assert_eq!(editor.cursor.x, 0, "kursor tidak bergerak");
+    reduce(&mut editor, Action::HScroll(-4));
+    assert_eq!(editor.scroll_x, 6);
+    // Never past the widest line minus the window.
+    reduce(&mut editor, Action::HScroll(10_000));
+    assert_eq!(editor.scroll_x, 200 - 80);
+    reduce(&mut editor, Action::HScroll(-10_000));
+    assert_eq!(editor.scroll_x, 0);
+}
+
+/// With wrap on there is nothing to scroll, so the gesture turns wrapping off — that is
+/// what "show me the rest of this line" means.
+#[test]
+fn a_horizontal_wheel_with_wrap_on_stops_wrapping() {
+    let mut editor = EditorState::new(None);
+    editor.buffer = TextBuffer::from_lines(vec!["x".repeat(200)]);
+    editor.text_display_width = 80;
+    editor.page_size = 10;
+    editor.soft_wrap = true;
+    editor.enter_mode(EditorMode::Edit);
+
+    reduce(&mut editor, Action::HScroll(5));
+    assert!(!editor.soft_wrap, "wrap dimatikan");
+    assert_eq!(editor.scroll_x, 5);
+    assert_eq!(
+        editor.status_message.as_deref(),
+        Some("Soft wrap: off (horizontal scroll)")
+    );
+}
+
+/// Keys that move the cursor pull the window back so the cursor stays visible.
+#[test]
+fn the_cursor_drags_the_horizontal_window_along() {
+    let mut editor = EditorState::new(None);
+    editor.buffer = TextBuffer::from_lines(vec!["x".repeat(200)]);
+    editor.text_display_width = 80;
+    editor.page_size = 10;
+    editor.soft_wrap = false;
+    editor.enter_mode(EditorMode::Edit);
+    editor.cursor.x = 150;
+    editor.adjust_hscroll();
+    assert_eq!(
+        editor.scroll_x,
+        150 + 1 - 80,
+        "kursor di tepi kanan terlihat"
+    );
+    editor.cursor.x = 0;
+    editor.adjust_hscroll();
+    assert_eq!(editor.scroll_x, 0, "kembali ke kolom 0");
+}
+
+/// Turning wrap back on clears the offset: a wrapped line has no horizontal overflow.
+#[test]
+fn turning_wrap_on_clears_the_horizontal_offset() {
+    let mut editor = EditorState::new(None);
+    editor.buffer = TextBuffer::from_lines(vec!["x".repeat(200)]);
+    editor.text_display_width = 80;
+    editor.soft_wrap = false;
+    editor.enter_mode(EditorMode::Edit);
+    reduce(&mut editor, Action::HScroll(20));
+    assert_eq!(editor.scroll_x, 20);
+    reduce(&mut editor, Action::ToggleWrap);
+    assert!(editor.soft_wrap);
+    assert_eq!(editor.scroll_x, 0);
+}

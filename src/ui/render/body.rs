@@ -46,6 +46,7 @@ pub fn render_text_buffer(editor: &mut EditorState, f: &mut Frame, area: Rect) {
     editor.ui_hit.text_x = area.x + text_x_offset;
     editor.ui_hit.text_width = text_width as u16;
     editor.adjust_scroll(viewport_height);
+    editor.adjust_hscroll();
 
     // Refresh syntax highlight spans for the visible window (no-op unless the
     // buffer is dirty or the window moved). Over-including with soft wrap is
@@ -234,13 +235,18 @@ pub fn render_text_buffer(editor: &mut EditorState, f: &mut Frame, area: Rect) {
                         vrow += 1;
                     }
                 } else {
-                    let dcol = display_width_up_to(line, cursor_x) as u16;
-                    let (cx, cy) = clamp_cursor(
-                        f.area(),
-                        area.x + text_x_offset + dcol,
-                        area.y + vrow as u16,
-                    );
-                    f.set_cursor_position((cx, cy));
+                    let dcol = display_width_up_to(line, cursor_x);
+                    let sx = editor.scroll_x;
+                    // The cursor can be scrolled out of the window: leave it hidden then
+                    // rather than draw it on the wrong character.
+                    if dcol >= sx && (dcol - sx) < text_width {
+                        let (cx, cy) = clamp_cursor(
+                            f.area(),
+                            area.x + text_x_offset + (dcol - sx) as u16,
+                            area.y + vrow as u16,
+                        );
+                        f.set_cursor_position((cx, cy));
+                    }
                 }
                 break;
             } else {
@@ -262,8 +268,15 @@ fn right_align(num: usize, digits: usize) -> String {
 }
 
 fn render_line(editor: &EditorState, y: usize) -> Line<'static> {
-    let len = editor.buffer.lines[y].len();
-    render_line_range(editor, y, 0, len)
+    let line = &editor.buffer.lines[y];
+    // With soft wrap off the window can start mid-line: skip the columns scrolled away
+    // rather than cut the text at the right edge.
+    let start = if editor.soft_wrap || editor.scroll_x == 0 {
+        0
+    } else {
+        crate::utils::wrap::byte_at_visual_col(line, 0, line.len(), editor.scroll_x, true)
+    };
+    render_line_range(editor, y, start, line.len())
 }
 
 fn render_line_range(
@@ -450,7 +463,10 @@ pub fn click_to_cursor(editor: &EditorState, col: u16, row: u16) -> Option<(usiz
                 let byte = if gutter {
                     0
                 } else {
-                    byte_at_visual_col(line, 0, line.len(), vcol, true)
+                    // The window may be scrolled sideways; a click lands on the column the
+                    // user sees, not on the column of an unscrolled line.
+                    let col = vcol + editor.scroll_x;
+                    byte_at_visual_col(line, 0, line.len(), col, true)
                 };
                 return Some((buf_y, byte));
             }
@@ -534,5 +550,52 @@ mod control_char_rendering_tests {
                 "{line:?} を描くと {drawn:?}（{drawn_cols} 桁）だが、幅は別の値と数えている"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod horizontal_scroll_tests {
+    use super::*;
+    use crate::state::EditorState;
+    use crate::state::buffer::TextBuffer;
+
+    fn rendered_at(line: &str, scroll_x: usize) -> String {
+        let mut editor = EditorState::new(None);
+        editor.buffer = TextBuffer::from_lines(vec![line.to_string()]);
+        editor.soft_wrap = false;
+        editor.scroll_x = scroll_x;
+        editor.text_display_width = 40;
+        render_line(&editor, 0)
+            .spans
+            .iter()
+            .map(|s| s.content.as_ref())
+            .collect()
+    }
+
+    /// The window starts mid-line instead of cutting the text at the right edge.
+    #[test]
+    fn a_scrolled_line_starts_at_the_offset_column() {
+        assert_eq!(rendered_at("0123456789abcdef", 0), "0123456789abcdef");
+        let scrolled = rendered_at("0123456789abcdef", 5);
+        assert!(
+            scrolled.starts_with("56789abcdef"),
+            "mulai dari kolom 5: {scrolled:?}"
+        );
+    }
+
+    /// A click lands on the character the user sees, not on the unscrolled one.
+    #[test]
+    fn a_click_accounts_for_the_horizontal_offset() {
+        let mut editor = EditorState::new(None);
+        editor.buffer = TextBuffer::from_lines(vec!["0123456789abcdef".to_string()]);
+        editor.soft_wrap = false;
+        editor.scroll_x = 5;
+        editor.ui_hit.text_area = crate::sidebar::Area::new(0, 0, 40, 5);
+        editor.ui_hit.text_x = 0;
+        editor.ui_hit.text_width = 40;
+        // Column 2 of the window is column 7 of the line.
+        let (line, byte) = click_to_cursor(&editor, 2, 0).expect("hit");
+        assert_eq!(line, 0);
+        assert_eq!(byte, 7);
     }
 }

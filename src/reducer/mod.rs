@@ -752,6 +752,15 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         },
         Action::BrowseExpandOrOpen => browse::expand_or_open(editor),
         Action::BrowseCollapseOrParent => browse::collapse_or_parent(editor),
+        Action::HScroll(delta) => {
+            if matches!(
+                editor.mode,
+                crate::state::EditorMode::Edit | crate::state::EditorMode::Glide
+            ) {
+                hscroll(editor, delta);
+            }
+            EventResult::Continue
+        }
         Action::SidebarFocus(tab) => sidebar::focus(editor, tab),
         Action::SidebarUnfocus => sidebar::unfocus(editor),
         Action::SidebarMoveUp => sidebar::move_up(editor),
@@ -782,6 +791,21 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
 
         _ => editor::apply_editor_event(editor, &action),
     }
+}
+
+/// Move the editor's window sideways. With soft wrap on there is nothing to scroll, so the
+/// gesture turns wrapping off first — the user is saying "show me the rest of this line".
+fn hscroll(editor: &mut EditorState, delta: isize) {
+    if editor.soft_wrap {
+        editor.soft_wrap = false;
+        crate::reducer::status::set_info(editor, "Soft wrap: off (horizontal scroll)");
+    }
+    let max = editor.max_scroll_x() as isize;
+    let next = (editor.scroll_x as isize + delta).clamp(0, max);
+    editor.scroll_x = next as usize;
+    // The wheel owns the window until a key asks for the cursor back — same rule as the
+    // vertical scroll.
+    editor.scroll_parked = true;
 }
 
 /// `i`（Markdown プレビュー）: 画面に出ている URL の画像を取りに行く。

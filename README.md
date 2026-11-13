@@ -109,6 +109,9 @@ The panel is **mouse-first**:
 
 - click a row — a folder opens or closes, a file opens, a change opens its diff
 - click a tab in the header — switches views (clicking the open tab never closes it)
+- horizontal wheel (or Shift+wheel / a trackpad swipe) — scrolls the text sideways when
+  soft wrap is off; with wrap on it turns wrapping off first, because that is what "show me
+  the rest of this line" means (`Ctrl+W` turns it back on)
 - wheel over the panel — scrolls the list; the **selection stays put**, so reading never
   changes what Enter would open (the same is true of the wheel in the buffer: it scrolls the
   viewport, the cursor does not move until you press a key)
