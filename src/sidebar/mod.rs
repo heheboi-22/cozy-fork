@@ -15,6 +15,7 @@
 //! in `ui::render::sidebar`.
 
 use std::collections::{HashMap, HashSet};
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
@@ -185,6 +186,10 @@ impl GitFile {
 pub struct GitEntry {
     pub file: GitFile,
     pub staged: bool,
+    /// Lines added on this side (`git diff --numstat`).
+    pub added: usize,
+    /// Lines removed on this side.
+    pub deleted: usize,
 }
 
 impl GitEntry {
@@ -195,6 +200,14 @@ impl GitEntry {
     pub fn untracked(&self) -> bool {
         !self.staged && self.file.untracked()
     }
+}
+
+/// What lives under a path, for tinting the *explorer* — which only knows files on disk,
+/// not git. Deleted wins over added: a folder holding a removal is the louder fact.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ChangeFlags {
+    pub deleted: bool,
+    pub added: bool,
 }
 
 /// The two groups, in the order they are drawn.
@@ -254,7 +267,11 @@ impl GitChanges {
         match git_status(root) {
             Ok((text, prefix)) => {
                 changes.repo = true;
-                changes.absorb(&text, &prefix);
+                // The counts come from `git diff --numstat`, one call per side: the
+                // porcelain status says *that* a file changed, never how much.
+                let staged = numstat(root, &prefix, true);
+                let unstaged = numstat(root, &prefix, false);
+                changes.absorb(root, &text, &prefix, &staged, &unstaged);
             }
             Err(err) if err.contains("not a git repository") => {}
             Err(err) => changes.error = Some(err),
@@ -279,7 +296,14 @@ impl GitChanges {
         !self.entries.is_empty()
     }
 
-    fn absorb(&mut self, text: &str, prefix: &Path) {
+    fn absorb(
+        &mut self,
+        root: &Path,
+        text: &str,
+        prefix: &Path,
+        staged_stats: &HashMap<PathBuf, (usize, usize)>,
+        unstaged_stats: &HashMap<PathBuf, (usize, usize)>,
+    ) {
         let mut files: Vec<GitFile> = Vec::new();
         self.branch = None;
         for line in text.lines() {
@@ -327,9 +351,18 @@ impl GitChanges {
                     file.unstaged()
                 };
                 if belongs {
+                    let stats = if staged { staged_stats } else { unstaged_stats };
+                    let (added, deleted) = match stats.get(&file.rel) {
+                        Some(&(a, d)) => (a, d),
+                        // An untracked file has no diff to count: every line is new.
+                        None if file.untracked() => (count_lines(&root.join(&file.rel)), 0),
+                        None => (0, 0),
+                    };
                     self.entries.push(GitEntry {
                         file: file.clone(),
                         staged,
+                        added,
+                        deleted,
                     });
                 }
             }
@@ -474,6 +507,40 @@ impl GitChanges {
         n
     }
 
+    /// `(added, deleted)` lines under a group or directory node.
+    pub fn totals_under(&self, idx: usize) -> (usize, usize) {
+        let mut added = 0;
+        let mut deleted = 0;
+        let mut stack = vec![idx];
+        while let Some(node) = stack.pop() {
+            if let Some(entry) = self.nodes[node].file.and_then(|i| self.entries.get(i)) {
+                added += entry.added;
+                deleted += entry.deleted;
+            }
+            stack.extend(self.nodes[node].children.iter().copied());
+        }
+        (added, deleted)
+    }
+
+    /// What kind of change sits under `rel` — the explorer's tint. Works for a file too
+    /// (the answer is then about that one file).
+    pub fn flags_under(&self, rel: &Path) -> ChangeFlags {
+        let mut flags = ChangeFlags::default();
+        for entry in &self.entries {
+            if !entry.file.rel.starts_with(rel) {
+                continue;
+            }
+            if entry.file.index == 'D' || entry.file.worktree == 'D' {
+                flags.deleted = true;
+            }
+            let badge = entry.badge();
+            if badge == 'U' || badge == 'A' {
+                flags.added = true;
+            }
+        }
+        flags
+    }
+
     fn clamp_selection(&mut self) {
         let visible = self.visible();
         if !visible.contains(&self.selected) {
@@ -565,6 +632,61 @@ impl GitChanges {
                 cur = self.nodes[idx].parent;
             }
         }
+    }
+}
+
+/// `git diff --numstat` per side, keyed by path relative to the sidebar root.
+///
+/// `--numstat` prints `<added>\t<deleted>\t<path>`; a binary file has `-` for both
+/// counts, which maps to `(0, 0)` — the row still shows its status letter.
+fn numstat(dir: &Path, prefix: &Path, cached: bool) -> HashMap<PathBuf, (usize, usize)> {
+    let mut cmd = Command::new("git");
+    cmd.arg("-C").arg(dir).args(["diff", "--numstat"]);
+    if cached {
+        cmd.arg("--cached");
+    }
+    let Ok(output) = cmd.output() else {
+        return HashMap::new();
+    };
+    if !output.status.success() {
+        return HashMap::new();
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    let mut map = HashMap::new();
+    for line in text.lines() {
+        let mut cols = line.split('\t');
+        let (Some(added), Some(deleted), Some(path)) = (cols.next(), cols.next(), cols.next())
+        else {
+            continue;
+        };
+        let parse = |s: &str| s.parse::<usize>().unwrap_or(0);
+        let rel = match Path::new(&unquote(path)).strip_prefix(prefix) {
+            Ok(stripped) => stripped.to_path_buf(),
+            Err(_) if prefix.as_os_str().is_empty() => PathBuf::from(unquote(path)),
+            Err(_) => continue,
+        };
+        map.insert(rel, (parse(added), parse(deleted)));
+    }
+    map
+}
+
+/// Lines in a file, for an untracked one (git has nothing to diff it against). Reads at
+/// most [`MAX_COUNT_BYTES`] so a stray 5 GB artefact cannot stall the refresh.
+fn count_lines(path: &Path) -> usize {
+    const MAX_COUNT_BYTES: u64 = 4 * 1024 * 1024;
+    let Ok(file) = std::fs::File::open(path) else {
+        return 0;
+    };
+    let mut buf = Vec::new();
+    if file.take(MAX_COUNT_BYTES).read_to_end(&mut buf).is_err() {
+        return 0;
+    }
+    let newlines = buf.iter().filter(|&&b| b == b'\n').count();
+    // A last line without a trailing newline still counts.
+    if !buf.is_empty() && !buf.ends_with(b"\n") {
+        newlines + 1
+    } else {
+        newlines
     }
 }
 
@@ -690,14 +812,19 @@ impl Sidebar {
 mod tests {
     use super::*;
 
-    /// Parse porcelain output. `root` stays in the call sites for readability — the model
-    /// no longer stores it (the panel owns the root).
-    fn status(text: &str, _root: &Path, prefix: &str) -> GitChanges {
+    /// Parse porcelain output against a fake root (nothing here touches the disk).
+    fn status(text: &str, root: &Path, prefix: &str) -> GitChanges {
         let mut changes = GitChanges {
             repo: true,
             ..Default::default()
         };
-        changes.absorb(text, Path::new(prefix));
+        changes.absorb(
+            root,
+            text,
+            Path::new(prefix),
+            &HashMap::new(),
+            &HashMap::new(),
+        );
         changes
     }
 
@@ -899,6 +1026,108 @@ mod tests {
         let changes = status("## No commits yet on main\n?? a.txt\n", root, "");
         assert_eq!(changes.branch.as_deref(), Some("main"));
         assert_eq!(changes.count(), 1);
+    }
+
+    #[test]
+    fn totals_add_up_per_group_and_per_folder() {
+        let root = Path::new("/work/app");
+        let mut changes = status(
+            "## main\n M src/a.rs\n M src/ui/b.rs\n?? top.md\n",
+            root,
+            "",
+        );
+        for (entry, (added, deleted)) in
+            changes
+                .entries
+                .iter_mut()
+                .zip([(2usize, 1usize), (10, 0), (5, 0)])
+        {
+            entry.added = added;
+            entry.deleted = deleted;
+        }
+        let src = changes.nodes.iter().position(|n| n.name == "src").unwrap();
+        assert_eq!(changes.totals_under(src), (12, 1));
+        let group = changes
+            .nodes
+            .iter()
+            .position(|n| n.group == Some(GitGroup::Unstaged))
+            .unwrap();
+        assert_eq!(changes.totals_under(group), (17, 1), "grup menjumlah semua");
+    }
+
+    #[test]
+    fn flags_tell_the_explorer_what_lives_under_a_folder() {
+        let root = Path::new("/work/app");
+        let changes = status(
+            "## main\n D src/gone.rs\n?? src/new.rs\n M src/old.rs\n",
+            root,
+            "",
+        );
+        let src = changes.flags_under(Path::new("src"));
+        assert!(src.deleted, "ada berkas terhapus");
+        assert!(src.added, "ada berkas baru");
+        assert!(changes.flags_under(Path::new("src/gone.rs")).deleted);
+        let untouched = changes.flags_under(Path::new("src/old.rs"));
+        assert!(!untouched.deleted && !untouched.added);
+        let other = changes.flags_under(Path::new("other"));
+        assert!(!other.deleted && !other.added);
+    }
+
+    /// The counts come from `git diff --numstat` — measured on a real repository.
+    #[test]
+    fn loads_line_counts_from_a_real_repository() {
+        use std::process::Command as Cmd;
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-numstat-")
+            .tempdir()
+            .unwrap();
+        let dir = tmp.path();
+        let run = |args: &[&str]| {
+            let out = Cmd::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} gagal");
+        };
+        run(&["init", "-q", "."]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\nthree\n").unwrap();
+        run(&["add", "-A"]);
+        run(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ]);
+        // one line replaced, one added
+        std::fs::write(dir.join("a.txt"), "one\nTWO\nthree\nfour\n").unwrap();
+        std::fs::write(dir.join("new.txt"), "alpha\nbeta\n").unwrap();
+
+        let changes = GitChanges::load(dir);
+        let a = changes
+            .entries
+            .iter()
+            .find(|e| e.file.rel == Path::new("a.txt"))
+            .expect("a.txt");
+        assert_eq!(
+            (a.added, a.deleted),
+            (2, 1),
+            "satu baris ganti + satu tambah"
+        );
+        let new = changes
+            .entries
+            .iter()
+            .find(|e| e.file.rel == Path::new("new.txt"))
+            .expect("new.txt");
+        assert_eq!(
+            (new.added, new.deleted),
+            (2, 0),
+            "untracked: semua baris baru"
+        );
+        assert_eq!(changes.entries.len(), 2);
     }
 
     #[test]

@@ -90,9 +90,16 @@ Ctrl+S Save   Ctrl+B Browse ...  │
   (the index) and **Changes** (the working tree), each a tree of directories with
   `M`/`A`/`D`/`U` letters, a per-folder count, and the branch name. A file that is staged
   and modified again appears in both groups.
+- Every row carries **how many lines changed** — `+12 −3` per file, summed per folder and
+  per group, right-aligned and coloured green/red (binary changes show no count).
 - **Click a change to read its hunks** — a single-file diff view opens beside the panel:
   `@@` headers, `+`/`-` lines with both line-number gutters, `n`/`N` to jump between hunks,
-  `q`/`Esc` back to the list. Untracked files open as wholly added lines.
+  `q`/`Esc` back to the list. Changed lines are tinted edge to edge (green added, red
+  removed), so a long diff can be scanned without reading every sign. Untracked files open
+  as wholly added lines.
+- In the **Files** tab, a folder that holds a removal is tinted red and one that holds an
+  addition orange; a new file's own name is orange too. The rule is the same one VS Code
+  uses, carried by colour instead of a badge.
 - `j`/`k` or ↑/↓ move, `Enter`/`l` open a file (or expand a folder), `h` collapse,
   `Tab` switches tabs, `r` re-reads `git status`, `Esc` hands the keyboard back
 
