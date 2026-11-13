@@ -129,6 +129,11 @@ pub enum Action {
     SidebarNextTab,  // Tab: Files ↔ Git
     SidebarRefresh,  // r: re-read git status
 
+    // Single-file diff view (opened from the Source Control rows).
+    NextHunk,      // n
+    PreviousHunk,  // N
+    CloseFileDiff, // q / Esc: back to the editor, keyboard back in the panel
+
     // Mouse. Positions are screen cells; the reducer resolves them against
     // `EditorState::ui_hit` (the rectangles the last frame drew).
     MouseDown(MouseButton, u16, u16),

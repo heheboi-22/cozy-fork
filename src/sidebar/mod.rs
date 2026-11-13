@@ -4,9 +4,12 @@
 //! lazy folder reads, a `.gitignore`-aware background index — so the sidebar and the
 //! full-screen Browser can never disagree about what is in the folder.
 //!
-//! The git side is a small tree of `git status --porcelain` entries: the list VS Code's
-//! Source Control view shows, grouped by directory. It is loaded on demand (first look at
-//! the tab, after a save, or `r`) rather than every frame: each load is a `git` process.
+//! The git side is the list VS Code's Source Control view shows: `git status --porcelain`
+//! split into **Staged Changes** (what is in the index) and **Changes** (what is only in
+//! the working tree), each grouped into a small tree of directories. A file that is both
+//! staged and modified again appears in both, exactly as VS Code shows it. The list is
+//! loaded on demand (first look at the tab, after a save, or `r`) rather than every frame:
+//! each load is a `git` process.
 //!
 //! Like `browse`, this module holds no crossterm/ratatui types — colours and glyphs live
 //! in `ui::render::sidebar`.
@@ -23,6 +26,8 @@ pub const DEFAULT_WIDTH: u16 = 34;
 pub const MAX_WIDTH: u16 = 60;
 /// Total terminal width below which the sidebar steps aside entirely.
 pub const MIN_TOTAL_WIDTH: u16 = 70;
+
+// ── screen geometry (mouse) ────────────────────────────────────────────────────
 
 /// A screen rectangle in cells. Plain numbers on purpose: the state layer stays free of
 /// ratatui types, and a click can be resolved without asking the renderer again.
@@ -134,6 +139,8 @@ impl SidebarTab {
     }
 }
 
+// ── git status model ───────────────────────────────────────────────────────────
+
 /// One `git status` entry: the two porcelain columns plus the path, relative to the
 /// sidebar root (not the repository root — `GitChanges::load` strips the cwd prefix).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -146,13 +153,9 @@ pub struct GitFile {
 }
 
 impl GitFile {
-    /// The single letter shown next to the row, VS Code style.
-    pub fn badge(&self) -> char {
-        let pick = if self.index != ' ' && self.index != '?' {
-            self.index
-        } else {
-            self.worktree
-        };
+    /// The letter shown next to the row, from whichever side this row belongs to.
+    pub fn badge(&self, staged: bool) -> char {
+        let pick = if staged { self.index } else { self.worktree };
         match pick {
             '?' => 'U',
             '!' => '!',
@@ -161,16 +164,61 @@ impl GitFile {
         }
     }
 
+    pub fn untracked(&self) -> bool {
+        self.index == '?' && self.worktree == '?'
+    }
+
+    /// Changed in the index (staged), i.e. it belongs in the "Staged Changes" group.
     pub fn staged(&self) -> bool {
         self.index != ' ' && self.index != '?'
     }
 
-    pub fn deleted(&self) -> bool {
-        self.index == 'D' || self.worktree == 'D'
+    /// Changed in the working tree, i.e. it belongs in the "Changes" group.
+    pub fn unstaged(&self) -> bool {
+        self.worktree != ' ' || self.index == '?'
     }
 }
 
-/// A row in the git tree: a directory that holds changed files, or a changed file.
+/// One row of the change list: a path on the staged side or the unstaged side. A file
+/// that is staged *and* modified again produces two entries.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GitEntry {
+    pub file: GitFile,
+    pub staged: bool,
+}
+
+impl GitEntry {
+    pub fn badge(&self) -> char {
+        self.file.badge(self.staged)
+    }
+
+    pub fn untracked(&self) -> bool {
+        !self.staged && self.file.untracked()
+    }
+}
+
+/// The two groups, in the order they are drawn.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GitGroup {
+    Staged,
+    Unstaged,
+}
+
+impl GitGroup {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Staged => "Staged Changes",
+            Self::Unstaged => "Changes",
+        }
+    }
+
+    pub fn staged(self) -> bool {
+        matches!(self, Self::Staged)
+    }
+}
+
+/// A row in the git tree: a section header, a directory that holds changed files, or a
+/// changed file.
 #[derive(Debug, Clone)]
 pub struct GitNode {
     pub name: String,
@@ -178,18 +226,19 @@ pub struct GitNode {
     pub depth: usize,
     pub parent: Option<usize>,
     pub children: Vec<usize>,
-    /// Index into [`GitChanges::files`] for file rows.
+    /// Index into [`GitChanges::entries`] for file rows.
     pub file: Option<usize>,
+    /// `Some` for the two section headers ("Staged Changes" / "Changes").
+    pub group: Option<GitGroup>,
 }
 
-/// The Source Control view: branch, status entries, and a tree over their paths.
+/// The Source Control view: branch, the two groups, and a tree over their paths.
 #[derive(Debug, Clone, Default)]
 pub struct GitChanges {
-    pub root: PathBuf,
     /// `false` when the root is not inside a git work tree (no error, just empty).
     pub repo: bool,
     pub branch: Option<String>,
-    pub files: Vec<GitFile>,
+    pub entries: Vec<GitEntry>,
     pub nodes: Vec<GitNode>,
     pub selected: usize,
     pub expanded: HashSet<usize>,
@@ -201,10 +250,7 @@ impl GitChanges {
     /// is not a repository, or a broken repo all end up as a flag or an `error` string,
     /// so the view can say what happened instead of going blank.
     pub fn load(root: &Path) -> Self {
-        let mut changes = Self {
-            root: root.to_path_buf(),
-            ..Default::default()
-        };
+        let mut changes = Self::default();
         match git_status(root) {
             Ok((text, prefix)) => {
                 changes.repo = true;
@@ -216,17 +262,25 @@ impl GitChanges {
         changes
     }
 
-    /// Total changed files (the badge next to the tab).
+    /// Total rows (staged + unstaged) — the badge next to the tab.
     pub fn count(&self) -> usize {
-        self.files.len()
+        self.entries.len()
+    }
+
+    pub fn staged_count(&self) -> usize {
+        self.entries.iter().filter(|e| e.staged).count()
+    }
+
+    pub fn unstaged_count(&self) -> usize {
+        self.entries.iter().filter(|e| !e.staged).count()
     }
 
     pub fn has_changes(&self) -> bool {
-        !self.files.is_empty()
+        !self.entries.is_empty()
     }
 
     fn absorb(&mut self, text: &str, prefix: &Path) {
-        self.files.clear();
+        let mut files: Vec<GitFile> = Vec::new();
         self.branch = None;
         for line in text.lines() {
             if let Some(rest) = line.strip_prefix("## ") {
@@ -256,46 +310,65 @@ impl GitChanges {
                     Err(_) => continue,
                 }
             };
-            self.files.push(GitFile {
+            files.push(GitFile {
                 rel,
                 index,
                 worktree,
             });
         }
+
+        // One entry per side, in the order the groups are drawn.
+        self.entries.clear();
+        for staged in [true, false] {
+            for file in &files {
+                let belongs = if staged {
+                    file.staged()
+                } else {
+                    file.unstaged()
+                };
+                if belongs {
+                    self.entries.push(GitEntry {
+                        file: file.clone(),
+                        staged,
+                    });
+                }
+            }
+        }
         self.rebuild();
     }
 
-    /// Rebuild the tree from `files`. Parents are created on the way down, and the
-    /// result is sorted directories-first like the explorer.
+    /// Rebuild the tree: node 0 and node 1 are the two group headers, everything else
+    /// nests under the one it belongs to. Sorted directories-first, like the explorer.
     fn rebuild(&mut self) {
         self.nodes.clear();
         self.expanded.clear();
-        let root_name = self
-            .root
-            .file_name()
-            .map(|s| s.to_string_lossy().to_string())
-            .unwrap_or_else(|| self.root.to_string_lossy().to_string());
-        self.nodes.push(GitNode {
-            name: root_name,
-            is_dir: true,
-            depth: 0,
-            parent: None,
-            children: Vec::new(),
-            file: None,
-        });
-        self.expanded.insert(0);
+        for group in [GitGroup::Staged, GitGroup::Unstaged] {
+            let idx = self.nodes.len();
+            self.nodes.push(GitNode {
+                name: group.label().to_string(),
+                is_dir: true,
+                depth: 0,
+                parent: None,
+                children: Vec::new(),
+                file: None,
+                group: Some(group),
+            });
+            self.expanded.insert(idx);
+        }
+        let staged_root = 0usize;
+        let unstaged_root = 1usize;
 
-        let mut index_of: HashMap<PathBuf, usize> = HashMap::new();
-        index_of.insert(PathBuf::new(), 0);
-
-        let entries: Vec<(PathBuf, usize)> = self
-            .files
+        let mut index_of: HashMap<(usize, PathBuf), usize> = HashMap::new();
+        let entries: Vec<(usize, PathBuf)> = self
+            .entries
             .iter()
             .enumerate()
-            .map(|(i, f)| (f.rel.clone(), i))
+            .map(|(i, e)| (i, e.file.rel.clone()))
             .collect();
 
-        for (rel, file_idx) in entries {
+        for (entry_idx, rel) in entries {
+            let staged = self.entries[entry_idx].staged;
+            let root = if staged { staged_root } else { unstaged_root };
             let parts: Vec<String> = rel
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -303,12 +376,13 @@ impl GitChanges {
             if parts.is_empty() {
                 continue;
             }
-            let mut cur = 0usize;
+            let mut cur = root;
             let mut acc = PathBuf::new();
             for (i, part) in parts.iter().enumerate() {
                 acc.push(part);
                 let last = i + 1 == parts.len();
-                if let Some(&existing) = index_of.get(&acc) {
+                let key = (root, acc.clone());
+                if let Some(&existing) = index_of.get(&key) {
                     cur = existing;
                     continue;
                 }
@@ -320,20 +394,19 @@ impl GitChanges {
                     depth,
                     parent: Some(cur),
                     children: Vec::new(),
-                    file: if last { Some(file_idx) } else { None },
+                    file: if last { Some(entry_idx) } else { None },
+                    group: None,
                 });
                 self.nodes[cur].children.push(idx);
                 // Directories start open: a change list is read at a glance.
                 if !last {
                     self.expanded.insert(idx);
                 }
-                index_of.insert(acc.clone(), idx);
+                index_of.insert(key, idx);
                 cur = idx;
             }
         }
 
-        // Sort with a key captured up front: the closure cannot borrow `self.nodes`
-        // while the same vector is being mutated in place.
         let keys: Vec<(bool, String)> = self
             .nodes
             .iter()
@@ -347,10 +420,27 @@ impl GitChanges {
         self.clamp_selection();
     }
 
-    /// Rows to draw: expanded directories and the files inside them, depth-first.
+    /// Rows to draw: the two group headers (when they have anything in them), their open
+    /// directories, and the files inside, depth-first.
     pub fn visible(&self) -> Vec<usize> {
         let mut out = Vec::with_capacity(self.nodes.len());
-        self.collect_visible(0, &mut out);
+        for (idx, node) in self.nodes.iter().enumerate() {
+            let Some(group) = node.group else { continue };
+            let count = if group.staged() {
+                self.staged_count()
+            } else {
+                self.unstaged_count()
+            };
+            if count == 0 {
+                continue;
+            }
+            out.push(idx);
+            if self.expanded.contains(&idx) {
+                for &child in &node.children {
+                    self.collect_visible(child, &mut out);
+                }
+            }
+        }
         out
     }
 
@@ -364,8 +454,15 @@ impl GitChanges {
         }
     }
 
-    /// Changed files under `idx` (used for the count on directory rows).
+    /// Changed files under `idx` (the count beside a group or directory row).
     pub fn count_under(&self, idx: usize) -> usize {
+        if let Some(group) = self.nodes[idx].group {
+            return if group.staged() {
+                self.staged_count()
+            } else {
+                self.unstaged_count()
+            };
+        }
         let mut n = 0;
         for &child in &self.nodes[idx].children {
             if self.nodes[child].is_dir {
@@ -414,24 +511,24 @@ impl GitChanges {
         }
     }
 
-    /// Enter / `l`: open a directory, or hand back the file to open.
-    pub fn expand_or_open(&mut self) -> Option<PathBuf> {
+    /// Enter / `l`: open a group or directory, or hand back the entry to diff.
+    pub fn expand_or_open(&mut self) -> Option<GitEntry> {
         let idx = self.selected;
-        if idx < self.nodes.len() && self.nodes[idx].is_dir {
+        let node = self.nodes.get(idx)?;
+        if node.is_dir {
             if !self.expanded.remove(&idx) {
                 self.expanded.insert(idx);
             }
             None
         } else {
-            let file = self.nodes.get(idx).and_then(|n| n.file)?;
-            self.files.get(file).map(|f| self.root.join(&f.rel))
+            node.file.and_then(|i| self.entries.get(i)).cloned()
         }
     }
 
     /// `h` / ←: close an open directory, otherwise step to the parent.
     pub fn collapse_or_parent(&mut self) {
         let idx = self.selected;
-        if idx == 0 || idx >= self.nodes.len() {
+        if idx >= self.nodes.len() {
             return;
         }
         if self.nodes[idx].is_dir && self.expanded.remove(&idx) {
@@ -442,10 +539,32 @@ impl GitChanges {
         }
     }
 
-    /// The selected row's status entry, if the selection is on a file.
-    pub fn selected_file(&self) -> Option<&GitFile> {
+    /// The selected row's entry, if the selection is on a file.
+    pub fn selected_entry(&self) -> Option<&GitEntry> {
         let node = self.nodes.get(self.selected)?;
-        self.files.get(node.file?)
+        self.entries.get(node.file?)
+    }
+
+    /// Select the row for `(rel, staged)` if it is still there (used across a reload).
+    pub fn select_entry(&mut self, rel: &Path, staged: bool) {
+        let found = self
+            .entries
+            .iter()
+            .position(|e| e.staged == staged && e.file.rel == rel);
+        if let Some(entry) = found
+            && let Some(node) = self
+                .nodes
+                .iter()
+                .position(|n| n.file == Some(entry) && !n.is_dir)
+        {
+            self.selected = node;
+            // Reveal it: open the group and every directory above it.
+            let mut cur = self.nodes[node].parent;
+            while let Some(idx) = cur {
+                self.expanded.insert(idx);
+                cur = self.nodes[idx].parent;
+            }
+        }
     }
 }
 
@@ -511,6 +630,8 @@ fn unquote(raw: &str) -> String {
     trimmed.to_string()
 }
 
+// ── the panel ──────────────────────────────────────────────────────────────────
+
 /// The whole left panel: which tab is showing, where the keyboard is, and both trees.
 #[derive(Debug)]
 pub struct Sidebar {
@@ -541,13 +662,22 @@ impl Sidebar {
             focused: false,
             tab: SidebarTab::Files,
             width: DEFAULT_WIDTH,
+            // `skip_hidden = false`: a VS Code-like explorer shows `.vscode`, `.env`.
             explorer: BrowseTree::build_lazy(root, false),
             git,
         }
     }
 
+    /// Re-read `git status`, keeping the cursor on the same change when it is still there.
     pub fn refresh_git(&mut self) {
+        let keep = self
+            .git
+            .selected_entry()
+            .map(|e| (e.file.rel.clone(), e.staged));
         self.git = GitChanges::load(&self.root);
+        if let Some((rel, staged)) = keep {
+            self.git.select_entry(&rel, staged);
+        }
     }
 
     /// Panel width for a terminal `total` columns wide.
@@ -560,14 +690,23 @@ impl Sidebar {
 mod tests {
     use super::*;
 
-    fn status(text: &str, root: &Path, prefix: &str) -> GitChanges {
+    /// Parse porcelain output. `root` stays in the call sites for readability — the model
+    /// no longer stores it (the panel owns the root).
+    fn status(text: &str, _root: &Path, prefix: &str) -> GitChanges {
         let mut changes = GitChanges {
-            root: root.to_path_buf(),
             repo: true,
             ..Default::default()
         };
         changes.absorb(text, Path::new(prefix));
         changes
+    }
+
+    fn names(changes: &GitChanges) -> Vec<&str> {
+        changes
+            .visible()
+            .iter()
+            .map(|&i| changes.nodes[i].name.as_str())
+            .collect()
     }
 
     #[test]
@@ -620,21 +759,61 @@ mod tests {
         let text = "## main...origin/main\n M src/main.rs\n?? notes/todo.md\n D old.txt\n";
         let changes = status(text, root, "");
         assert_eq!(changes.branch.as_deref(), Some("main"));
-        assert_eq!(changes.files.len(), 3);
-        let badges: Vec<char> = changes.files.iter().map(|f| f.badge()).collect();
+        assert_eq!(changes.count(), 3);
+        assert_eq!(changes.staged_count(), 0, "semua perubahan work-tree");
+        assert_eq!(changes.unstaged_count(), 3);
+        let badges: Vec<char> = changes.entries.iter().map(|e| e.badge()).collect();
         assert_eq!(badges, vec!['M', 'U', 'D']);
-        assert_eq!(changes.files[1].badge(), 'U', "untracked");
-        assert!(changes.files[2].deleted());
-        assert!(!changes.files[0].staged(), " M is a work-tree change");
+        assert!(changes.entries[1].untracked());
+        assert_eq!(changes.entries[2].badge(), 'D', "berkas terhapus");
     }
 
     #[test]
-    fn staged_status_wins_and_badge_is_a_single_letter() {
+    fn staged_and_unstaged_are_two_groups() {
         let root = Path::new("/work/app");
-        let changes = status("## main\nM  src/lib.rs\nMM both.rs\n", root, "");
-        assert!(changes.files[0].staged());
-        assert_eq!(changes.files[0].badge(), 'M');
-        assert_eq!(changes.files[1].badge(), 'M', "staged M and work-tree M");
+        // `M ` staged only, ` M` work-tree only, `MM` both.
+        let text = "## main\nM  a.rs\n M b.rs\nMM c.rs\n?? d.rs\n";
+        let changes = status(text, root, "");
+        assert_eq!(changes.staged_count(), 2, "a.rs + c.rs");
+        assert_eq!(changes.unstaged_count(), 3, "b.rs + c.rs + d.rs");
+        assert_eq!(
+            names(&changes),
+            vec![
+                "Staged Changes",
+                "a.rs",
+                "c.rs",
+                "Changes",
+                "b.rs",
+                "c.rs",
+                "d.rs",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_staged_file_keeps_its_own_badge() {
+        let root = Path::new("/work/app");
+        let changes = status("## main\nMM c.rs\n", root, "");
+        let staged = changes
+            .entries
+            .iter()
+            .find(|e| e.staged)
+            .expect("baris staged");
+        let unstaged = changes
+            .entries
+            .iter()
+            .find(|e| !e.staged)
+            .expect("baris unstaged");
+        assert_eq!(staged.badge(), 'M', "sisi index");
+        assert_eq!(unstaged.badge(), 'M', "sisi work-tree");
+        assert!(staged.file.rel == unstaged.file.rel, "jalur yang sama");
+    }
+
+    #[test]
+    fn an_empty_group_is_not_drawn() {
+        let root = Path::new("/work/app");
+        let changes = status("## main\n M only-unstaged.rs\n", root, "");
+        assert_eq!(names(&changes), vec!["Changes", "only-unstaged.rs"]);
     }
 
     #[test]
@@ -642,8 +821,8 @@ mod tests {
         let root = Path::new("/work/app");
         let text = "## main\n M src/main.rs\n M elsewhere/other.rs\n";
         let changes = status(text, root, "src/");
-        assert_eq!(changes.files.len(), 1, "only files under src/");
-        assert_eq!(changes.files[0].rel, Path::new("main.rs"));
+        assert_eq!(changes.count(), 1, "only files under src/");
+        assert_eq!(changes.entries[0].file.rel, Path::new("main.rs"));
     }
 
     #[test]
@@ -651,34 +830,29 @@ mod tests {
         let root = Path::new("/work/app");
         let text = "## main\n M src/ui/a.rs\n M src/ui/b.rs\n M src/lib.rs\n?? top.md\n";
         let changes = status(text, root, "");
-        let visible: Vec<&str> = changes
-            .visible()
-            .iter()
-            .map(|&i| changes.nodes[i].name.as_str())
-            .collect();
         assert_eq!(
-            visible,
-            vec!["app", "src", "ui", "a.rs", "b.rs", "lib.rs", "top.md"]
+            names(&changes),
+            vec!["Changes", "src", "ui", "a.rs", "b.rs", "lib.rs", "top.md",]
         );
         let ui = changes.nodes.iter().position(|n| n.name == "ui").unwrap();
         assert_eq!(changes.count_under(ui), 2);
+        assert_eq!(changes.count_under(0), 0, "Staged kosong");
+        assert_eq!(changes.count_under(1), 4, "Changes berisi 4");
     }
 
     #[test]
-    fn enter_on_a_file_hands_back_the_absolute_path() {
+    fn enter_on_a_file_hands_back_its_entry() {
         let root = Path::new("/work/app");
-        let changes = status("## main\n M src/main.rs\n", root, "");
-        let mut changes = changes;
+        let mut changes = status("## main\n M src/main.rs\n", root, "");
         let file = changes
             .nodes
             .iter()
             .position(|n| n.name == "main.rs")
             .unwrap();
         changes.selected = file;
-        assert_eq!(
-            changes.expand_or_open(),
-            Some(PathBuf::from("/work/app/src/main.rs"))
-        );
+        let entry = changes.expand_or_open().expect("entry");
+        assert_eq!(entry.file.rel, Path::new("src/main.rs"));
+        assert!(!entry.staged);
     }
 
     #[test]
@@ -688,19 +862,29 @@ mod tests {
         let src = changes.nodes.iter().position(|n| n.name == "src").unwrap();
         changes.selected = src;
         changes.collapse_or_parent();
-        let names: Vec<&str> = changes
+        assert_eq!(names(&changes), vec!["Changes", "src"]);
+    }
+
+    #[test]
+    fn a_group_header_collapses_too() {
+        let root = Path::new("/work/app");
+        let mut changes = status("## main\n M a.rs\n", root, "");
+        let group = changes
             .visible()
-            .iter()
-            .map(|&i| changes.nodes[i].name.as_str())
-            .collect();
-        assert_eq!(names, vec!["app", "src"]);
+            .into_iter()
+            .find(|&i| changes.nodes[i].group == Some(GitGroup::Unstaged))
+            .unwrap();
+        changes.selected = group;
+        changes.collapse_or_parent();
+        assert_eq!(names(&changes), vec!["Changes"]);
     }
 
     #[test]
     fn renames_show_the_new_name() {
         let root = Path::new("/work/app");
         let changes = status("## main\nR  old.rs -> new.rs\n", root, "");
-        assert_eq!(changes.files[0].rel, Path::new("new.rs"));
+        assert_eq!(changes.entries[0].file.rel, Path::new("new.rs"));
+        assert!(changes.entries[0].staged, "R di kolom index = staged");
     }
 
     #[test]
@@ -714,6 +898,17 @@ mod tests {
         let root = Path::new("/work/app");
         let changes = status("## No commits yet on main\n?? a.txt\n", root, "");
         assert_eq!(changes.branch.as_deref(), Some("main"));
-        assert_eq!(changes.files.len(), 1);
+        assert_eq!(changes.count(), 1);
+    }
+
+    #[test]
+    fn select_entry_finds_the_row_again_after_a_reload() {
+        let root = Path::new("/work/app");
+        let mut changes = status("## main\n M a.rs\n?? b.rs\n", root, "");
+        changes.select_entry(Path::new("b.rs"), false);
+        assert_eq!(
+            changes.selected_entry().unwrap().file.rel,
+            Path::new("b.rs")
+        );
     }
 }

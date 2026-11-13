@@ -38,6 +38,7 @@ pub fn render_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {
         EditorMode::Browse => render_browse_shortcuts(editor, f, area),
         EditorMode::Markdown => render_read_shortcuts(editor, f, area),
         EditorMode::View => render_view_shortcuts(editor, f, area),
+        EditorMode::FileDiff => render_file_diff_shortcuts(editor, f, area),
         EditorMode::DiffReview => render_diff_review_shortcuts(editor, f, area),
         EditorMode::DiffCommitMsg => render_diff_commit_shortcuts(editor, f, area),
         EditorMode::Command => render_command_shortcuts(editor, f, area),
@@ -299,6 +300,21 @@ pub fn render_status_bar(editor: &EditorState, f: &mut Frame, area: Rect) {
                 format!(" {}{}{}{}", name, ro, hint, status),
                 format!("{}/{} ", pos, total),
             )
+        }
+        EditorMode::FileDiff => {
+            let title = editor
+                .file_diff
+                .as_ref()
+                .map(|v| v.title.clone())
+                .unwrap_or_default();
+            // An untracked file has no `@@` at all — saying "hunk 1/1" there would be a lie.
+            let counter = editor
+                .file_diff
+                .as_ref()
+                .filter(|v| !v.hunks.is_empty())
+                .map(|v| format!("hunk {}/{} ", v.current + 1, v.hunks.len()))
+                .unwrap_or_default();
+            (format!(" Diff {title}{status}"), counter)
         }
         EditorMode::DiffReview => {
             let (cur, total, approved) = editor
@@ -786,6 +802,36 @@ fn render_edit_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {
             layout[1],
         );
     }
+}
+
+/// The file diff is a pager: move, jump hunks, leave.
+fn render_file_diff_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {
+    if area.width < 50 || area.height <= 1 {
+        f.render_widget(
+            Paragraph::new(compact_line(
+                editor,
+                &[("jk", "Scroll"), ("n/N", "Hunk"), ("q", "Back")],
+            )),
+            row(area, 0),
+        );
+        return;
+    }
+    let layout = wide_layout(area);
+    f.render_widget(
+        Paragraph::new(compact_line(
+            editor,
+            &[
+                ("jk/↑↓", "Scroll"),
+                ("PgUp/Dn", "Page"),
+                ("gg/G", "Top/Bot"),
+            ],
+        )),
+        layout[0],
+    );
+    f.render_widget(
+        Paragraph::new(compact_line(editor, &[("n/N", "Hunk"), ("q/Esc", "Back")])),
+        layout[1],
+    );
 }
 
 fn render_browse_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {

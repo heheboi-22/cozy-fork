@@ -14,7 +14,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::sidebar::{Area, GitFile, Sidebar, SidebarHit, SidebarTab};
+use crate::sidebar::{Area, GitEntry, Sidebar, SidebarHit, SidebarTab};
 use crate::state::EditorState;
 
 const ACCENT: Color = Color::Rgb(97, 175, 239);
@@ -215,7 +215,7 @@ fn git_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarH
             Vec::new(),
         );
     }
-    if git.files.is_empty() {
+    if git.entries.is_empty() {
         return (
             vec![Line::from(Span::styled(
                 "  Working tree clean",
@@ -237,9 +237,27 @@ fn git_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarH
     let mut hits = Vec::with_capacity(height);
     for &idx in visible.iter().skip(scroll).take(height) {
         let node = &git.nodes[idx];
-        let indent = "  ".repeat(node.depth);
         let mut spans: Vec<Span<'static>> = Vec::new();
-        if node.is_dir {
+        if let Some(group) = node.group {
+            // "▾ Staged Changes 2" — the two sections VS Code shows.
+            let arrow = if git.expanded.contains(&idx) {
+                "▾ "
+            } else {
+                "▸ "
+            };
+            let count = git.count_under(idx);
+            spans.push(Span::styled(
+                format!("{arrow}{}", group.label()),
+                Style::default()
+                    .fg(Color::White)
+                    .add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                format!(" {count}"),
+                Style::default().fg(ACCENT),
+            ));
+        } else if node.is_dir {
+            let indent = "  ".repeat(node.depth);
             let arrow = if git.expanded.contains(&idx) {
                 "▾ "
             } else {
@@ -255,12 +273,13 @@ fn git_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarH
                 Style::default().fg(DIM),
             ));
         } else {
-            spans.push(Span::raw(format!("{indent}  ")));
-            if let Some(file) = node.file.map(|i| &git.files[i]) {
+            let indent = "  ".repeat(node.depth);
+            spans.push(Span::raw(indent));
+            if let Some(entry) = node.file.and_then(|i| git.entries.get(i)) {
                 spans.push(Span::styled(
-                    format!("{} ", file.badge()),
+                    format!("{} ", entry.badge()),
                     Style::default()
-                        .fg(status_color(file))
+                        .fg(status_color(entry))
                         .add_modifier(Modifier::BOLD),
                 ));
                 spans.push(Span::styled(node.name.clone(), Style::default().fg(TEXT)));
@@ -317,14 +336,14 @@ fn truncate_to(text: &str, width: usize) -> String {
     out
 }
 
-fn status_color(file: &GitFile) -> Color {
-    match file.badge() {
+fn status_color(entry: &GitEntry) -> Color {
+    match entry.badge() {
         'A' | 'U' => Color::Rgb(152, 195, 121),
         'D' | '!' => Color::Rgb(224, 108, 117),
         'R' | 'C' => Color::Rgb(86, 182, 194),
         'M' => Color::Rgb(229, 192, 123),
         _ => {
-            if file.staged() {
+            if entry.staged {
                 Color::Rgb(152, 195, 121)
             } else {
                 Color::Rgb(229, 192, 123)

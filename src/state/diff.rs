@@ -349,3 +349,390 @@ diff --git a/README.md b/README.md\n\
         assert_eq!(reparsed[0].file, "README.md");
     }
 }
+
+// ── single-file diff (the Source Control view's reader) ───────────────────────
+
+/// How many rows a single-file diff may hold. A 100k-line diff is not a reading surface;
+/// past this the view says it stopped instead of holding the whole thing in memory.
+const MAX_FILE_DIFF_ROWS: usize = 4000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileDiffKind {
+    /// A note that is not content: "new file", "binary", a truncation marker.
+    Meta,
+    /// An `@@ … @@` header.
+    Hunk,
+    Add,
+    Del,
+    Context,
+}
+
+/// One row of the single-file diff view, with the line numbers the `@@` header promised.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FileDiffRow {
+    pub kind: FileDiffKind,
+    pub old: Option<usize>,
+    pub new: Option<usize>,
+    pub text: String,
+}
+
+/// An open single-file diff: what the Source Control row opens into.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FileDiffView {
+    /// `"src/main.rs"` plus which side it came from.
+    pub title: String,
+    pub rel: std::path::PathBuf,
+    /// `true` when this is the index side (`git diff --cached`).
+    pub staged: bool,
+    pub rows: Vec<FileDiffRow>,
+    pub scroll: usize,
+    /// Set by the renderer — the reducer needs it to clamp scrolling.
+    pub view_height: usize,
+    /// Row indices of the `@@` headers, for `n`/`N`.
+    pub hunks: Vec<usize>,
+    pub current: usize,
+}
+
+impl FileDiffView {
+    pub fn build(rel: &std::path::Path, staged: bool, rows: Vec<FileDiffRow>) -> Self {
+        let hunks: Vec<usize> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.kind == FileDiffKind::Hunk)
+            .map(|(i, _)| i)
+            .collect();
+        let side = if staged { "staged" } else { "working tree" };
+        Self {
+            title: format!("{}  ·  {side}", rel.display()),
+            rel: rel.to_path_buf(),
+            staged,
+            rows,
+            scroll: 0,
+            view_height: 0,
+            hunks,
+            current: 0,
+        }
+    }
+
+    pub fn max_scroll(&self) -> usize {
+        self.rows.len().saturating_sub(self.view_height.max(1))
+    }
+
+    pub fn clamp_scroll(&mut self) {
+        self.scroll = self.scroll.min(self.max_scroll());
+    }
+}
+
+/// Read one path's diff: `staged` picks the index side, and an untracked file has no diff
+/// at all, so it is shown as wholly added (that is also what `git diff --no-index` would
+/// say, without the process).
+pub fn load_file_diff(
+    dir: &Path,
+    rel: &Path,
+    staged: bool,
+    untracked: bool,
+) -> Result<Vec<FileDiffRow>, String> {
+    if untracked {
+        let path = dir.join(rel);
+        let bytes = std::fs::read(&path).map_err(|e| format!("could not read file: {e}"))?;
+        if bytes.contains(&0) {
+            return Ok(vec![FileDiffRow {
+                kind: FileDiffKind::Meta,
+                old: None,
+                new: None,
+                text: "binary file — no text diff".to_string(),
+            }]);
+        }
+        let text = String::from_utf8_lossy(&bytes);
+        return Ok(rows_from_added(&text));
+    }
+
+    let mut cmd = Command::new("git");
+    cmd.arg("diff").arg("--no-color").arg("-U3");
+    if staged {
+        cmd.arg("--cached");
+    }
+    cmd.arg("--").arg(rel);
+    cmd.current_dir(dir);
+    let output = cmd
+        .output()
+        .map_err(|e| format!("could not run git: {e}"))?;
+    if !output.status.success() {
+        return Err(String::from_utf8_lossy(&output.stderr).trim().to_string());
+    }
+    let text = String::from_utf8_lossy(&output.stdout);
+    if text.trim().is_empty() {
+        // Nothing between the two sides (a stat-only change, or a file that was staged
+        // and then reverted). Say so rather than show an empty page.
+        return Ok(vec![FileDiffRow {
+            kind: FileDiffKind::Meta,
+            old: None,
+            new: None,
+            text: "no textual differences".to_string(),
+        }]);
+    }
+    Ok(parse_file_diff(&text))
+}
+
+/// A whole file rendered as additions (untracked files, which git has nothing to compare
+/// against).
+fn rows_from_added(text: &str) -> Vec<FileDiffRow> {
+    let mut rows = Vec::new();
+    for (i, line) in text.lines().enumerate() {
+        if rows.len() >= MAX_FILE_DIFF_ROWS {
+            rows.push(FileDiffRow {
+                kind: FileDiffKind::Meta,
+                old: None,
+                new: None,
+                text: format!("… {} more lines not shown", text.lines().count() - i),
+            });
+            break;
+        }
+        rows.push(FileDiffRow {
+            kind: FileDiffKind::Add,
+            old: None,
+            new: Some(i + 1),
+            text: line.to_string(),
+        });
+    }
+    rows
+}
+
+/// Parse one file's unified diff into display rows. File headers are dropped (the title
+/// already says which file this is); notes like "new file mode" are kept.
+pub fn parse_file_diff(diff: &str) -> Vec<FileDiffRow> {
+    let mut rows = Vec::with_capacity(diff.lines().count().min(MAX_FILE_DIFF_ROWS));
+    let mut old_no = 0usize;
+    let mut new_no = 0usize;
+
+    for line in diff.lines() {
+        if rows.len() >= MAX_FILE_DIFF_ROWS {
+            rows.push(FileDiffRow {
+                kind: FileDiffKind::Meta,
+                old: None,
+                new: None,
+                text: "… diff truncated".to_string(),
+            });
+            break;
+        }
+        if line.starts_with("@@") {
+            if let Some((old, new)) = hunk_numbers(line) {
+                old_no = old;
+                new_no = new;
+            }
+            rows.push(FileDiffRow {
+                kind: FileDiffKind::Hunk,
+                old: None,
+                new: None,
+                text: line.to_string(),
+            });
+            continue;
+        }
+        // The per-file plumbing `git diff` emits; the view already knows the file.
+        if line.starts_with("diff --git")
+            || line.starts_with("index ")
+            || line.starts_with("--- ")
+            || line.starts_with("+++ ")
+        {
+            continue;
+        }
+        if line.starts_with("new file")
+            || line.starts_with("deleted file")
+            || line.starts_with("old mode")
+            || line.starts_with("new mode")
+            || line.starts_with("rename ")
+            || line.starts_with("copy ")
+            || line.starts_with("similarity ")
+            || line.starts_with("dissimilarity ")
+            || line.starts_with("Binary files")
+            || line.starts_with("\\ No newline")
+        {
+            rows.push(FileDiffRow {
+                kind: FileDiffKind::Meta,
+                old: None,
+                new: None,
+                text: line.trim_start_matches("\\ ").to_string(),
+            });
+            continue;
+        }
+        if let Some(text) = line.strip_prefix('+') {
+            rows.push(FileDiffRow {
+                kind: FileDiffKind::Add,
+                old: None,
+                new: Some(new_no),
+                text: text.to_string(),
+            });
+            new_no += 1;
+        } else if let Some(text) = line.strip_prefix('-') {
+            rows.push(FileDiffRow {
+                kind: FileDiffKind::Del,
+                old: Some(old_no),
+                new: None,
+                text: text.to_string(),
+            });
+            old_no += 1;
+        } else {
+            let text = line.strip_prefix(' ').unwrap_or(line);
+            rows.push(FileDiffRow {
+                kind: FileDiffKind::Context,
+                old: Some(old_no),
+                new: Some(new_no),
+                text: text.to_string(),
+            });
+            old_no += 1;
+            new_no += 1;
+        }
+    }
+    rows
+}
+
+/// `@@ -12,7 +12,9 @@` → `(12, 12)` (the first line of each side).
+fn hunk_numbers(line: &str) -> Option<(usize, usize)> {
+    let rest = line.strip_prefix("@@ -")?;
+    let (old_part, rest) = rest.split_once(' ')?;
+    let rest = rest.strip_prefix('+')?;
+    let new_part = rest.split(' ').next()?;
+    let old = old_part.split(',').next()?.parse().ok()?;
+    let new = new_part.split(',').next()?.parse().ok()?;
+    Some((old, new))
+}
+
+#[cfg(test)]
+mod file_diff_tests {
+    use super::*;
+
+    const DIFF: &str = "diff --git a/src/main.rs b/src/main.rs
+index 1111111..2222222 100644
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -1,3 +1,4 @@
+ fn main() {
+-    println!(\"old\");
++    println!(\"new\");
++    println!(\"more\");
+ }
+";
+
+    #[test]
+    fn parses_hunks_with_both_line_numbers() {
+        let rows = parse_file_diff(DIFF);
+        let kinds: Vec<FileDiffKind> = rows.iter().map(|r| r.kind).collect();
+        assert_eq!(
+            kinds,
+            vec![
+                FileDiffKind::Hunk,
+                FileDiffKind::Context,
+                FileDiffKind::Del,
+                FileDiffKind::Add,
+                FileDiffKind::Add,
+                FileDiffKind::Context,
+            ]
+        );
+        assert_eq!(rows[1].old, Some(1), "context: baris sisi lama");
+        assert_eq!(rows[1].new, Some(1), "context: baris sisi baru");
+        assert_eq!(rows[2].old, Some(2), "hapus: hanya nomor lama");
+        assert_eq!(rows[2].new, None);
+        assert_eq!(rows[3].new, Some(2), "tambah: hanya nomor baru");
+        assert_eq!(rows[5].old, Some(3));
+        assert_eq!(rows[5].new, Some(4), "baris baru menggeser nomor");
+    }
+
+    #[test]
+    fn the_file_header_is_not_a_row() {
+        let rows = parse_file_diff(DIFF);
+        assert!(
+            !rows.iter().any(|r| r.text.contains("diff --git")),
+            "judul sudah menyebut berkasnya"
+        );
+    }
+
+    #[test]
+    fn notes_like_new_file_are_kept_as_meta() {
+        let rows =
+            parse_file_diff("diff --git a/x b/x\nnew file mode 100644\n@@ -0,0 +1,1 @@\n+hi\n");
+        assert_eq!(rows[0].kind, FileDiffKind::Meta);
+        assert_eq!(rows[0].text, "new file mode 100644");
+        assert_eq!(rows[1].kind, FileDiffKind::Hunk);
+    }
+
+    #[test]
+    fn an_untracked_file_is_all_additions() {
+        let rows = rows_from_added("one\ntwo\n");
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.kind == FileDiffKind::Add));
+        assert_eq!(rows[1].new, Some(2));
+    }
+
+    #[test]
+    fn the_view_knows_where_its_hunks_are() {
+        let rows = parse_file_diff(DIFF);
+        let view = FileDiffView::build(std::path::Path::new("src/main.rs"), false, rows);
+        assert_eq!(view.hunks, vec![0]);
+        assert_eq!(view.title, "src/main.rs  ·  working tree");
+    }
+
+    /// The real thing: a temporary repository with a staged and an unstaged edit.
+    #[test]
+    fn loads_the_two_sides_of_a_real_repository() {
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-file-diff-")
+            .tempdir()
+            .unwrap();
+        let dir = tmp.path();
+        let run = |args: &[&str]| {
+            let out = Command::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} gagal");
+        };
+        run(&["init", "-q", "."]);
+        std::fs::write(dir.join("a.txt"), "one\n").unwrap();
+        run(&["add", "-A"]);
+        run(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ]);
+        std::fs::write(dir.join("a.txt"), "one\ntwo\n").unwrap();
+
+        let unstaged = load_file_diff(dir, Path::new("a.txt"), false, false).unwrap();
+        assert!(
+            unstaged
+                .iter()
+                .any(|r| r.kind == FileDiffKind::Add && r.text == "two"),
+            "sisi work-tree memuat baris baru"
+        );
+        assert!(
+            !unstaged
+                .iter()
+                .any(|r| r.kind == FileDiffKind::Add && r.text == "one"),
+            "sisi work-tree tidak memuat baris yang sudah di-commit"
+        );
+
+        run(&["add", "-A"]);
+        let staged = load_file_diff(dir, Path::new("a.txt"), true, false).unwrap();
+        assert!(
+            staged
+                .iter()
+                .any(|r| r.kind == FileDiffKind::Add && r.text == "two")
+        );
+    }
+
+    #[test]
+    fn an_untracked_file_loads_as_additions() {
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-file-diff-new-")
+            .tempdir()
+            .unwrap();
+        std::fs::write(tmp.path().join("new.txt"), "alpha\nbeta\n").unwrap();
+        let rows = load_file_diff(tmp.path(), Path::new("new.txt"), false, true).unwrap();
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.kind == FileDiffKind::Add));
+    }
+}

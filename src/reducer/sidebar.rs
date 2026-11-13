@@ -92,42 +92,37 @@ pub fn goto_bottom(editor: &mut EditorState) -> EventResult {
     EventResult::Continue
 }
 
-/// Enter / `l` / →: open the selected file (or toggle the selected folder).
+/// Enter / `l` / →: open the selected thing. In the explorer that is a file (into the
+/// buffer); in Source Control it is the change's diff — clicking a change must show the
+/// hunks, not the whole file.
 pub fn open(editor: &mut EditorState) -> EventResult {
+    enum Target {
+        File(std::path::PathBuf),
+        Diff(crate::sidebar::GitEntry),
+    }
+
     let target = {
         let Some(sidebar) = editor.sidebar.as_mut() else {
             return EventResult::Continue;
         };
         match sidebar.tab {
-            SidebarTab::Files => sidebar.explorer.expand_or_open(),
-            SidebarTab::Git => {
-                // A deleted file still has a row — that is how you learn it is gone — but
-                // there is nothing to open. Say so instead of failing to read it.
-                if sidebar.git.selected_file().is_some_and(|f| f.deleted()) {
-                    let name = sidebar
-                        .git
-                        .selected_file()
-                        .map(|f| f.rel.display().to_string())
-                        .unwrap_or_default();
-                    editor.set_status_message(
-                        format!("Deleted file: {name}"),
-                        StatusKind::Info,
-                        false,
-                    );
-                    return EventResult::Continue;
-                }
-                sidebar.git.expand_or_open()
-            }
+            SidebarTab::Files => sidebar.explorer.expand_or_open().map(Target::File),
+            SidebarTab::Git => sidebar.git.expand_or_open().map(Target::Diff),
         }
     };
 
-    let Some(path) = target else {
-        return EventResult::Continue;
-    };
+    match target {
+        Some(Target::File(path)) => open_path(editor, &path),
+        Some(Target::Diff(entry)) => crate::reducer::filediff::open(editor, &entry),
+        None => EventResult::Continue,
+    }
+}
+
+/// Load a file into the buffer and hand the keyboard back to the text, like VS Code: the
+/// panel stays open so the next file is one click away.
+fn open_path(editor: &mut EditorState, path: &std::path::Path) -> EventResult {
     let path_str = path.to_string_lossy().to_string();
     let result = editor.open_file(&path_str);
-    // Opening a file hands the keyboard back to the text, like VS Code: the panel stays
-    // open so the next file is one click away.
     editor.enter_mode(editor.home_mode());
     if let Some(sidebar) = editor.sidebar.as_mut() {
         sidebar.focused = false;
@@ -460,5 +455,74 @@ mod tests {
         let before = editor.sidebar.as_ref().unwrap().explorer.selected;
         let _ = mouse_scroll(&mut editor, 1, 60, 4);
         assert_eq!(editor.sidebar.as_ref().unwrap().explorer.selected, before);
+    }
+}
+
+#[cfg(test)]
+mod rendered_frame_tests {
+    use crate::sidebar::{SidebarTab, UiHit};
+    use crate::state::{EditorMode, EditorState};
+    use crate::ui::Renderer;
+    use ratatui::Terminal;
+    use ratatui::backend::TestBackend;
+    use std::fs;
+
+    /// Draw one real frame and hand back the editor with its recorded geometry.
+    fn drawn(cols: u16, rows: u16) -> (tempfile::TempDir, EditorState) {
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-probe-")
+            .tempdir()
+            .unwrap();
+        fs::create_dir_all(tmp.path().join("src")).unwrap();
+        fs::write(tmp.path().join("a.rs"), "fn a() {}\n").unwrap();
+
+        let mut editor = EditorState::new(None);
+        editor._working_dir = tmp.path().to_path_buf();
+        editor.sidebar = Some(crate::sidebar::Sidebar::new(tmp.path()));
+        editor.enter_mode(EditorMode::Edit);
+
+        let mut terminal = Terminal::new(TestBackend::new(cols, rows)).unwrap();
+        terminal
+            .draw(|f| {
+                editor.ui_hit = UiHit {
+                    screen: crate::sidebar::Area::from(f.area()),
+                    ..Default::default()
+                };
+                let chunks = Renderer::editor_layout(f.area(), &editor);
+                Renderer::render_body(&mut editor, f, chunks[0]);
+                Renderer::render_shortcuts(&editor, f, chunks[1]);
+                Renderer::render_status_bar(&editor, f, chunks[2]);
+                Renderer::render_sidebar(&mut editor, f, chunks[3]);
+            })
+            .unwrap();
+        (tmp, editor)
+    }
+
+    #[test]
+    fn the_panel_and_its_rows_are_recorded() {
+        let (_tmp, editor) = drawn(100, 24);
+        let hit = &editor.ui_hit;
+        assert!(!hit.sidebar.is_empty(), "panel rect");
+        assert_eq!(hit.divider, Some(33), "border column at width 34");
+        assert_eq!(hit.tabs.len(), 2, "dua tab");
+        assert!(!hit.rows.is_empty(), "baris tree tercatat");
+        assert_eq!(hit.tabs[1].0, SidebarTab::Git);
+        assert!(hit.body.contains(5, 3), "baris tree di dalam body");
+    }
+
+    #[test]
+    fn a_click_on_the_recorded_rect_switches_tabs() {
+        let (_tmp, mut editor) = drawn(100, 24);
+        let (_, start, end) = editor
+            .ui_hit
+            .tabs
+            .iter()
+            .find(|(tab, _, _)| *tab == SidebarTab::Git)
+            .copied()
+            .expect("tab Git");
+        let x = (start + end) / 2;
+        let y = editor.ui_hit.header.y;
+        let _ = super::mouse_down(&mut editor, crate::action::MouseButton::Left, x, y);
+        assert_eq!(editor.sidebar.as_ref().unwrap().tab, SidebarTab::Git);
     }
 }

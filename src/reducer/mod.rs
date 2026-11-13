@@ -6,6 +6,7 @@ pub mod cursor;
 pub mod delete;
 pub mod editor;
 pub mod file;
+pub mod filediff;
 pub mod helper;
 pub mod insert;
 pub mod operator;
@@ -521,6 +522,7 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         // for gg/G; dispatch those to the tree, leaving every other mode untouched.
         Action::MoveUp => match editor.mode {
             crate::state::EditorMode::Browse => browse::move_up(editor),
+            crate::state::EditorMode::FileDiff => filediff::scroll(editor, -1),
             crate::state::EditorMode::DiffReview => diff_move_hunk(editor, -1),
             _ => {
                 if editor.mode == crate::state::EditorMode::View {
@@ -538,6 +540,7 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         },
         Action::MoveDown => match editor.mode {
             crate::state::EditorMode::Browse => browse::move_down(editor),
+            crate::state::EditorMode::FileDiff => filediff::scroll(editor, 1),
             crate::state::EditorMode::DiffReview => diff_move_hunk(editor, 1),
             _ => {
                 if editor.mode == crate::state::EditorMode::View {
@@ -554,7 +557,14 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
             }
         },
         Action::PageUp => {
-            if editor.mode == crate::state::EditorMode::View {
+            if editor.mode == crate::state::EditorMode::FileDiff {
+                let step = editor
+                    .file_diff
+                    .as_ref()
+                    .map(|v| v.view_height.max(1))
+                    .unwrap_or(10) as isize;
+                filediff::scroll(editor, -step)
+            } else if editor.mode == crate::state::EditorMode::View {
                 let n = take_read_count_opt(editor).unwrap_or(1);
                 view_scroll(editor, -((view_page_step(editor) * n) as isize));
                 EventResult::Continue
@@ -567,7 +577,14 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
             }
         }
         Action::PageDown => {
-            if editor.mode == crate::state::EditorMode::View {
+            if editor.mode == crate::state::EditorMode::FileDiff {
+                let step = editor
+                    .file_diff
+                    .as_ref()
+                    .map(|v| v.view_height.max(1))
+                    .unwrap_or(10) as isize;
+                filediff::scroll(editor, step)
+            } else if editor.mode == crate::state::EditorMode::View {
                 let n = take_read_count_opt(editor).unwrap_or(1);
                 view_scroll(editor, (view_page_step(editor) * n) as isize);
                 EventResult::Continue
@@ -584,7 +601,9 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
             EventResult::Continue
         }
         Action::Wheel(delta) => {
-            if editor.mode == crate::state::EditorMode::View {
+            if editor.mode == crate::state::EditorMode::FileDiff {
+                filediff::scroll(editor, delta);
+            } else if editor.mode == crate::state::EditorMode::View {
                 editor.glide_prefix = None;
                 view_scroll(editor, delta);
             } else if let Some(view) = read_view(&editor.mode) {
@@ -638,6 +657,7 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         }
         Action::PageTop => match editor.mode {
             crate::state::EditorMode::Browse => browse::goto_top(editor),
+            crate::state::EditorMode::FileDiff => filediff::goto_top(editor),
             _ => {
                 if let Some(view) = read_view(&editor.mode) {
                     set_read_cursor(editor, view, 0);
@@ -649,6 +669,7 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         },
         Action::PageBottom => match editor.mode {
             crate::state::EditorMode::Browse => browse::goto_bottom(editor),
+            crate::state::EditorMode::FileDiff => filediff::goto_bottom(editor),
             _ => {
                 if let Some(view) = read_view(&editor.mode) {
                     let last = rv_line_count(editor, view).saturating_sub(1);
@@ -694,6 +715,7 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         }
         Action::Cancel => match editor.mode {
             crate::state::EditorMode::Browse => browse::cancel(editor),
+            crate::state::EditorMode::FileDiff => filediff::close(editor),
             crate::state::EditorMode::DiffReview => {
                 editor.diff_review = None;
                 editor.enter_mode(editor.home_mode());
@@ -729,6 +751,9 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         Action::SidebarCollapse => sidebar::collapse(editor),
         Action::SidebarNextTab => sidebar::next_tab(editor),
         Action::SidebarRefresh => sidebar::refresh(editor),
+        Action::NextHunk => filediff::next_hunk(editor, true),
+        Action::PreviousHunk => filediff::next_hunk(editor, false),
+        Action::CloseFileDiff => filediff::close(editor),
         Action::MouseDown(button, col, row) => sidebar::mouse_down(editor, button, col, row),
         Action::MouseDrag(col, row) => sidebar::mouse_drag(editor, col, row),
         Action::MouseUp => sidebar::mouse_up(editor),

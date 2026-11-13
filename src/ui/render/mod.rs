@@ -1,6 +1,7 @@
 pub mod body;
 pub mod browse;
 pub mod diff;
+pub mod filediff;
 pub mod footer;
 pub mod markdown;
 pub mod screen;
@@ -114,6 +115,10 @@ impl Renderer {
             markdown::render_markdown(editor, f, area);
             return;
         }
+        if editor.mode == EditorMode::FileDiff {
+            filediff::render_file_diff(editor, f, area);
+            return;
+        }
         if editor.mode == EditorMode::DiffReview || editor.mode == EditorMode::DiffCommitMsg {
             // Keep the diff visible while the commit message is typed.
             diff::render_diff_review(editor, f, area);
@@ -169,6 +174,7 @@ fn compact_shortcut_rows(is_narrow: bool, mode: EditorMode) -> u16 {
         | EditorMode::Browse
         | EditorMode::Markdown
         | EditorMode::View
+        | EditorMode::FileDiff
         | EditorMode::DiffReview
         | EditorMode::Help => 1,
     }
@@ -185,6 +191,7 @@ fn hidden_shortcut_rows(mode: EditorMode) -> u16 {
         | EditorMode::Browse
         | EditorMode::Markdown
         | EditorMode::View
+        | EditorMode::FileDiff
         | EditorMode::DiffReview
         | EditorMode::Help => 0,
     }

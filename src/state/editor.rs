@@ -116,6 +116,12 @@ pub enum EditorMode {
     View,
     DiffReview,
     DiffCommitMsg,
+    /// Satu berkas, hunk demi hunk — yang dibuka dari baris Source Control.
+    ///
+    /// ⚠️ **`DiffReview` とは別の面。** あちらは**セッション全体**を承認して stage する
+    /// 作業台、こちらは**1 本の差分を読む**だけの閲覧面。混ぜると「承認したつもりで
+    /// 読んでいた」が起きる。
+    FileDiff,
     Command,
 }
 
@@ -260,6 +266,8 @@ pub struct EditorState {
     pub ui_hit: crate::sidebar::UiHit,
     /// A drag on the panel's right border is in progress (the width follows the pointer).
     pub sidebar_drag: bool,
+    /// The single-file diff the Source Control view opened, if any.
+    pub file_diff: Option<crate::state::diff::FileDiffView>,
 }
 
 pub(crate) struct EditorStateInit {
@@ -520,6 +528,7 @@ impl EditorState {
             sidebar,
             ui_hit: crate::sidebar::UiHit::default(),
             sidebar_drag: false,
+            file_diff: None,
         }
         .with_recovery_offer()
         // ⭐ 設定の苦情も**画面へ**（`eprintln!` は TUI の絵を壊す・`#2`）。

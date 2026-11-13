@@ -7,7 +7,7 @@ pub mod key;
 
 pub use self::buffer::TextBuffer;
 pub use self::cursor::Cursor;
-pub use self::diff::{DiffLineKind, DiffReviewState};
+pub use self::diff::{DiffLineKind, DiffReviewState, FileDiffKind, FileDiffRow};
 pub use self::editor::{
     Config, EditorMode, EditorState, Register, ReplaceFocus, SearchMode, StatusKind, YankHighlight,
 };

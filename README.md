@@ -86,14 +86,19 @@ Ctrl+S Save   Ctrl+B Browse ...  │
 ```
 
 - `Alt+B` — focus the **Files** tab (again to hide the panel)
-- `Alt+G` — focus the **Git** tab: `git status` grouped by directory, with `M`/`A`/`D`/`U`
-  letters, a per-folder count, and the branch name
+- `Alt+G` — focus the **Git** tab: `git status` in VS Code's two groups, **Staged Changes**
+  (the index) and **Changes** (the working tree), each a tree of directories with
+  `M`/`A`/`D`/`U` letters, a per-folder count, and the branch name. A file that is staged
+  and modified again appears in both groups.
+- **Click a change to read its hunks** — a single-file diff view opens beside the panel:
+  `@@` headers, `+`/`-` lines with both line-number gutters, `n`/`N` to jump between hunks,
+  `q`/`Esc` back to the list. Untracked files open as wholly added lines.
 - `j`/`k` or ↑/↓ move, `Enter`/`l` open a file (or expand a folder), `h` collapse,
   `Tab` switches tabs, `r` re-reads `git status`, `Esc` hands the keyboard back
 
 The panel is **mouse-first**:
 
-- click a row — a folder opens or closes, a file opens
+- click a row — a folder opens or closes, a file opens, a change opens its diff
 - click a tab in the header — switches views (clicking the open tab never closes it)
 - wheel over the panel — walks the tree
 - drag the panel's right border — resizes it (never past half the screen)

@@ -54,6 +54,15 @@ fn sidebar_action(editor: &EditorState, code: KeyCode, modifiers: KeyModifiers) 
     if !sidebar.focused || !sidebar.visible {
         return None;
     }
+    // The panel borrows the plain keys only while the buffer has them too. The full
+    // surfaces (a diff, the Browser, the preview) own their keys even when the panel is
+    // focused — otherwise `q` in the diff view would just move the focus.
+    if !matches!(
+        editor.mode,
+        EditorMode::Edit | EditorMode::Glide | EditorMode::Welcome
+    ) {
+        return None;
+    }
     if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
         return None;
     }
@@ -465,6 +474,19 @@ impl Keymap {
                     _ => None,
                 }
             }
+            // The single-file diff: a pager with hunk jumps.
+            EditorMode::FileDiff => match code {
+                KeyCode::Char('j') | KeyCode::Down => Some(Action::MoveDown),
+                KeyCode::Char('k') | KeyCode::Up => Some(Action::MoveUp),
+                KeyCode::Char('n') => Some(Action::NextHunk),
+                KeyCode::Char('N') => Some(Action::PreviousHunk),
+                KeyCode::Char('g') => Some(Action::PageTop),
+                KeyCode::Char('G') => Some(Action::PageBottom),
+                KeyCode::Char(' ') | KeyCode::Char('f') => Some(Action::PageDown),
+                KeyCode::Char('b') => Some(Action::PageUp),
+                KeyCode::Char('q') => Some(Action::CloseFileDiff),
+                _ => None,
+            },
             EditorMode::DiffReview => match code {
                 KeyCode::Char('j') => Some(Action::MoveDown),
                 KeyCode::Char('k') => Some(Action::MoveUp),
