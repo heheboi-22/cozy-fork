@@ -11,6 +11,7 @@ pub mod insert;
 pub mod operator;
 pub mod replace;
 pub mod search;
+pub mod sidebar;
 pub mod status;
 
 #[cfg(test)]
@@ -718,6 +719,16 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         },
         Action::BrowseExpandOrOpen => browse::expand_or_open(editor),
         Action::BrowseCollapseOrParent => browse::collapse_or_parent(editor),
+        Action::SidebarFocus(tab) => sidebar::focus(editor, tab),
+        Action::SidebarUnfocus => sidebar::unfocus(editor),
+        Action::SidebarMoveUp => sidebar::move_up(editor),
+        Action::SidebarMoveDown => sidebar::move_down(editor),
+        Action::SidebarTop => sidebar::goto_top(editor),
+        Action::SidebarBottom => sidebar::goto_bottom(editor),
+        Action::SidebarOpen => sidebar::open(editor),
+        Action::SidebarCollapse => sidebar::collapse(editor),
+        Action::SidebarNextTab => sidebar::next_tab(editor),
+        Action::SidebarRefresh => sidebar::refresh(editor),
         Action::BrowseStartFilter => browse::start_filter(editor),
         Action::BrowseFilterChar(c) => browse::filter_char(editor, c),
         Action::BrowseFilterBackspace => browse::filter_backspace(editor),

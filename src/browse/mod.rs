@@ -105,6 +105,13 @@ pub struct BrowseTree {
     pending: Vec<(PathBuf, bool)>,
     /// 開閉・ノードの追加のたびに進む（可視列のキャッシュの鍵）。
     generation: u64,
+    /// 隠しファイル（`.vscode` など）をたどるか。
+    ///
+    /// ⭐ **Browse（全画面）は隠す・サイドバーは出す**。`ignore` の既定は「隠しを除く」
+    /// で、全画面のブラウザにはそれが正しい（`.git` や `.DS_Store` が並ぶと木が読めない）が、
+    /// VS Code 風のエクスプローラでは `.vscode` / `.env` が見えないと設定に手が届かない。
+    /// ⚠️ **`.git` はどちらの席でも除く**（VS Code の `files.exclude` と同じ既定）。
+    skip_hidden: bool,
     visible: RefCell<Option<VisibleCache>>,
 }
 
@@ -114,17 +121,30 @@ impl BrowseTree {
         Self::build_waiting(root, STARTUP_WAIT)
     }
 
+    /// Startup path for a tree drawn from the first frame (the sidebar): the root's own
+    /// children are read now, the rest arrives through [`Self::tick`] as the background
+    /// index finds it. Unlike [`Self::build`] it never blocks the caller.
+    /// `skip_hidden = false` is what the sidebar asks for: a VS Code-like explorer shows
+    /// `.vscode`, `.env`, `.github` (`.git` is excluded either way).
+    pub fn build_lazy(root: &Path, skip_hidden: bool) -> Self {
+        Self::build_waiting_with(root, Duration::ZERO, skip_hidden)
+    }
+
     fn build_waiting(root: &Path, wait: Duration) -> Self {
-        let mut tree = Self::empty(root);
+        Self::build_waiting_with(root, wait, true)
+    }
+
+    fn build_waiting_with(root: &Path, wait: Duration, skip_hidden: bool) -> Self {
+        let mut tree = Self::empty(root, skip_hidden);
         tree.ensure_loaded(0);
-        tree.index = Some(Arc::new(IndexHandle(spawn_index(root))));
+        tree.index = Some(Arc::new(IndexHandle(spawn_index(root, skip_hidden))));
         if !wait.is_zero() {
             tree.wait_for_index(wait);
         }
         tree
     }
 
-    fn empty(root: &Path) -> Self {
+    fn empty(root: &Path, skip_hidden: bool) -> Self {
         let root = root.to_path_buf();
         let name = root
             .file_name()
@@ -155,6 +175,7 @@ impl BrowseTree {
             absorbed: 0,
             pending: Vec::new(),
             generation: 0,
+            skip_hidden,
             visible: RefCell::new(None),
         }
     }
@@ -199,7 +220,7 @@ impl BrowseTree {
     /// テスト用: 裏の索引が終わらないままのツリー（直下も読まない）。
     #[cfg(test)]
     pub(crate) fn stalled(root: &Path) -> Self {
-        let mut tree = Self::empty(root);
+        let mut tree = Self::empty(root, true);
         tree.index = Some(Arc::new(IndexHandle(Arc::new(IndexJob::default()))));
         tree
     }
@@ -423,7 +444,7 @@ impl BrowseTree {
         }
         let dir = self.nodes[idx].path.clone();
         let mut touched = HashSet::new();
-        for (path, is_dir) in read_dir_filtered(&dir) {
+        for (path, is_dir) in read_dir_filtered(&dir, self.skip_hidden) {
             self.insert(path, is_dir, idx, &mut touched);
         }
         self.nodes[idx].loaded = true;
@@ -555,13 +576,15 @@ impl BrowseTree {
 }
 
 /// 1 つのフォルダの直下を、全体の走査と同じ規則（`.gitignore`/`.git`/隠し）で読む。
-fn read_dir_filtered(dir: &Path) -> Vec<(PathBuf, bool)> {
+fn read_dir_filtered(dir: &Path, skip_hidden: bool) -> Vec<(PathBuf, bool)> {
     ignore::WalkBuilder::new(dir)
         .standard_filters(true)
+        .hidden(skip_hidden)
         .max_depth(Some(1))
         .build()
         .flatten()
         .filter(|entry| entry.depth() == 1)
+        .filter(|entry| !is_git_dir(entry.path()))
         .map(|entry| {
             let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
             (entry.into_path(), is_dir)
@@ -569,8 +592,14 @@ fn read_dir_filtered(dir: &Path) -> Vec<(PathBuf, bool)> {
         .collect()
 }
 
+/// `.git` is never a row, whichever surface is drawing the tree (VS Code's default
+/// `files.exclude` makes the same call).
+fn is_git_dir(path: &Path) -> bool {
+    path.file_name().is_some_and(|n| n == ".git")
+}
+
 /// 裏のスレッドで `root` の下を全部たどる（`ignore` の並列ウォーカー）。
-fn spawn_index(root: &Path) -> Arc<IndexJob> {
+fn spawn_index(root: &Path, skip_hidden: bool) -> Arc<IndexJob> {
     let job = Arc::new(IndexJob::default());
     let worker = Arc::clone(&job);
     let root = root.to_path_buf();
@@ -580,6 +609,7 @@ fn spawn_index(root: &Path) -> Arc<IndexJob> {
             .unwrap_or(4);
         ignore::WalkBuilder::new(&root)
             .standard_filters(true)
+            .hidden(skip_hidden)
             .threads(threads)
             .build_parallel()
             .run(|| {
@@ -590,6 +620,7 @@ fn spawn_index(root: &Path) -> Arc<IndexJob> {
                     }
                     if let Ok(entry) = result
                         && entry.depth() > 0
+                        && !is_git_dir(entry.path())
                     {
                         let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
                         if let Ok(mut found) = job.found.lock() {

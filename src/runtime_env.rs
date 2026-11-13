@@ -43,3 +43,17 @@ pub(crate) fn compact() -> bool {
             .unwrap_or(false)
     })
 }
+
+/// The left sidebar is on by default; `COZY_NO_SIDEBAR` (set and not empty/"0") turns it
+/// off for builders that want the old full-width surface — a measurement run, a very
+/// small terminal, or a host that has its own file panel. Read once per process, like
+/// [`compact`].
+pub(crate) fn sidebar_disabled() -> bool {
+    use std::sync::OnceLock;
+    static OFF: OnceLock<bool> = OnceLock::new();
+    *OFF.get_or_init(|| {
+        std::env::var("COZY_NO_SIDEBAR")
+            .map(|v| !v.is_empty() && v != "0")
+            .unwrap_or(false)
+    })
+}

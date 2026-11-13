@@ -41,6 +41,8 @@ pub enum EditorAction {
     ToggleMarkdownPreview,
     ToggleDiffReview,
     EnterCommand,
+    SidebarFiles,
+    SidebarGit,
 }
 
 #[derive(Clone)]
@@ -135,6 +137,25 @@ fn file_shortcuts() -> Vec<Shortcut> {
             KeyModifiers::CONTROL,
             EditorAction::EnterBrowse,
             "Ctrl+B Browse...",
+        ),
+        // ⭐ The left panel: Files (Alt+B) and Git (Alt+G).
+        // ⚠️ Not VS Code's `Ctrl+Shift+E`/`Ctrl+Shift+G`: terminals disagree about
+        // reporting SHIFT together with CONTROL, and cozy's `Ctrl+B` is already the
+        // full-screen tree. Alt arrives as ESC+key, so it needs no fallback — and
+        // deliberately takes none: a function-key fallback here would shadow any
+        // `[keys]` override that happens to use that key (`is_default` would treat the
+        // user's binding as a default and the footer would name the fallback instead).
+        sc(
+            KeyCode::Char('b'),
+            KeyModifiers::ALT,
+            EditorAction::SidebarFiles,
+            "Alt+B Sidebar: Files",
+        ),
+        sc(
+            KeyCode::Char('g'),
+            KeyModifiers::ALT,
+            EditorAction::SidebarGit,
+            "Alt+G Sidebar: Git",
         ),
         // F3 is a tmux-safe Browse fallback: tmux's default prefix is Ctrl+B,
         // which it swallows before cozy ever sees it. Same shape as the F1/Ctrl+H
@@ -446,7 +467,9 @@ pub fn display_key(key: KeyCode, mods: KeyModifiers, style: KeyStyle) -> String 
             KeyStyle::Caret => format!("^{}", c.to_ascii_uppercase()),
             KeyStyle::Spelled => format!("Ctrl+{}", c.to_ascii_uppercase()),
         },
-        KeyCode::Char(c) if alt => format!("Alt+{c}"),
+        // Alt is spelled like Ctrl: the letter is the *key*, and terminals send it
+        // lower-case — `Alt+b` reads as a typo next to `Ctrl+B`.
+        KeyCode::Char(c) if alt => format!("Alt+{}", c.to_ascii_uppercase()),
         KeyCode::Char(c) => c.to_string(),
         KeyCode::F(n) => format!("F{n}"),
         KeyCode::Esc => "Esc".to_string(),
@@ -639,6 +662,8 @@ pub fn action_from_name(name: &str) -> Option<EditorAction> {
         "toggle_markdown" => Some(EditorAction::ToggleMarkdownPreview),
         "toggle_diff_review" => Some(EditorAction::ToggleDiffReview),
         "enter_command" => Some(EditorAction::EnterCommand),
+        "sidebar_files" => Some(EditorAction::SidebarFiles),
+        "sidebar_git" => Some(EditorAction::SidebarGit),
         "paste" => Some(EditorAction::Paste),
         _ => None,
     }

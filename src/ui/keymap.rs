@@ -46,6 +46,31 @@ fn is_reading_view(mode: &EditorMode) -> bool {
     )
 }
 
+/// Keys that belong to the sidebar **while it has the keyboard**. Anything with Ctrl/Alt
+/// held is left to the global table, so `Ctrl+S` still saves from inside the tree — the
+/// panel borrows the plain keys, not the editor's shortcuts.
+fn sidebar_action(editor: &EditorState, code: KeyCode, modifiers: KeyModifiers) -> Option<Action> {
+    let sidebar = editor.sidebar.as_ref()?;
+    if !sidebar.focused || !sidebar.visible {
+        return None;
+    }
+    if modifiers.contains(KeyModifiers::CONTROL) || modifiers.contains(KeyModifiers::ALT) {
+        return None;
+    }
+    Some(match code {
+        KeyCode::Up | KeyCode::Char('k') => Action::SidebarMoveUp,
+        KeyCode::Down | KeyCode::Char('j') => Action::SidebarMoveDown,
+        KeyCode::Char('g') => Action::SidebarTop,
+        KeyCode::Char('G') => Action::SidebarBottom,
+        KeyCode::Enter | KeyCode::Char('l') | KeyCode::Right => Action::SidebarOpen,
+        KeyCode::Char('h') | KeyCode::Left => Action::SidebarCollapse,
+        KeyCode::Tab => Action::SidebarNextTab,
+        KeyCode::Char('r') => Action::SidebarRefresh,
+        KeyCode::Esc | KeyCode::Char('q') => Action::SidebarUnfocus,
+        _ => return None,
+    })
+}
+
 pub struct Keymap;
 
 impl Keymap {
@@ -54,6 +79,13 @@ impl Keymap {
         code: KeyCode,
         modifiers: KeyModifiers,
     ) -> Option<Action> {
+        // 0. The sidebar owns the plain keys while it has the keyboard. This sits above
+        //    the global table because `Enter`, arrows and `q` all mean something else to
+        //    the buffer; only Ctrl/Alt combinations fall through to it.
+        if let Some(action) = sidebar_action(editor, code, modifiers) {
+            return Some(action);
+        }
+
         // 1. Check shortcuts (Global) - handles most cases
         if let Some(editor_action) = editor.shortcut_map.get(&(code, modifiers)) {
             match editor_action {
@@ -61,6 +93,12 @@ impl Keymap {
                 EditorAction::EnterSaveAs => return Some(Action::EnterMode(EditorMode::Save)),
                 EditorAction::EnterOpen => return Some(Action::EnterMode(EditorMode::Open)),
                 EditorAction::EnterBrowse => return Some(Action::EnterMode(EditorMode::Browse)),
+                EditorAction::SidebarFiles => {
+                    return Some(Action::SidebarFocus(crate::sidebar::SidebarTab::Files));
+                }
+                EditorAction::SidebarGit => {
+                    return Some(Action::SidebarFocus(crate::sidebar::SidebarTab::Git));
+                }
                 EditorAction::EnterExit => return Some(Action::EnterMode(EditorMode::Quit)),
                 EditorAction::ForceQuit => return Some(Action::Quit),
                 EditorAction::EnterSearch => return Some(Action::EnterMode(EditorMode::Search)),

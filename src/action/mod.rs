@@ -114,6 +114,20 @@ pub enum Action {
     BrowseStartFilter,  // /: begin incremental name filtering
     BrowseFilterChar(char), // a character typed while filtering
     BrowseFilterBackspace, // delete the last filter character
+
+    // Left sidebar (VS Code-style explorer + source control). The sidebar is not a
+    // mode: it sits beside the buffer, and only `focused` decides whether these keys
+    // reach the tree or the text.
+    SidebarFocus(crate::sidebar::SidebarTab), // open the panel on this tab (again = hide)
+    SidebarUnfocus,                           // Esc: hand the keyboard back to the buffer
+    SidebarMoveUp,
+    SidebarMoveDown,
+    SidebarTop,
+    SidebarBottom,
+    SidebarOpen,     // Enter / l / →: expand a folder, or open the file
+    SidebarCollapse, // h / ←: close a folder, or step to the parent
+    SidebarNextTab,  // Tab: Files ↔ Git
+    SidebarRefresh,  // r: re-read git status
 }
 
 /// `zz` / `zt` / `zb` —— 注目中のヒット行を画面のどこへ置くか（`#18`）。

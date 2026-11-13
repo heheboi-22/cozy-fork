@@ -252,6 +252,9 @@ pub struct EditorState {
     /// A save that stopped because the target's parent directory does not
     /// exist, waiting on the same kind of one-line answer as `recovery`.
     pub create_dir: Option<crate::file_io::CreateDirOffer>,
+    /// The left panel (explorer + source control). `None` for hosts that have no room
+    /// for it (compact/mobile) and in unit tests, which opt in by building one.
+    pub sidebar: Option<crate::sidebar::Sidebar>,
 }
 
 pub(crate) struct EditorStateInit {
@@ -328,7 +331,13 @@ impl EditorState {
 
     #[cfg(test)]
     pub fn new_with_config_dir(filename: Option<String>, config_dir: Option<&PathBuf>) -> Self {
-        Self::from_init(EditorStateInit::from_runtime(filename, config_dir.cloned()))
+        let mut state =
+            Self::from_init(EditorStateInit::from_runtime(filename, config_dir.cloned()));
+        // No sidebar by default in tests: building one spawns a background index over
+        // the crate directory for every `EditorState::new`. Tests that exercise the
+        // panel build it themselves (`sidebar::tests`, `reducer::sidebar`).
+        state.sidebar = None;
+        state
     }
 
     /// Effective line-number visibility. Precedence: an explicit runtime toggle
@@ -410,6 +419,12 @@ impl EditorState {
                 ),
             };
 
+        // The left panel is built here rather than on first use, so the folder is on
+        // screen from the first frame. Hosts that declared themselves low-spec keep the
+        // full width for text (`COZY_COMPACT`), and `COZY_NO_SIDEBAR=1` opts out.
+        let sidebar = (!crate::runtime_env::compact() && !crate::runtime_env::sidebar_disabled())
+            .then(|| crate::sidebar::Sidebar::new(&init.working_dir));
+
         Self {
             buffer: TextBuffer::from_lines_with_format(lines, format),
             cursor: Cursor::default(),
@@ -480,6 +495,7 @@ impl EditorState {
             swap_dirty: false,
             recovery: None,
             create_dir: None,
+            sidebar,
         }
         .with_recovery_offer()
         // ⭐ 設定の苦情も**画面へ**（`eprintln!` は TUI の絵を壊す・`#2`）。

@@ -4,6 +4,7 @@ pub mod diff;
 pub mod footer;
 pub mod markdown;
 pub mod screen;
+pub mod sidebar;
 
 use ratatui::{
     Frame,
@@ -41,14 +42,55 @@ impl Renderer {
         // 旧い綴りはここ 1 箇所だけで、`imageview` の依存（image / fast_image_resize）が
         // 乗った途端に AsRef の行き先が一意でなくなり E0283 で落ちた（2026-10-03 実測 ——
         // feature を切ると通る）。値渡しなら `I = [Constraint; 3]` で曖昧さが無い。
-        Layout::default()
+        let rows = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
                 Constraint::Min(1),
                 Constraint::Length(actual_shortcut_h),
                 Constraint::Length(status_bar_h),
             ])
-            .split(area)
+            .split(area);
+
+        // The sidebar shares the body band with the text: full editor height, minus the
+        // footer and status bar — VS Code's shape. It steps aside when the terminal is
+        // too narrow to keep a useful editing column beside it, and never appears over
+        // the full-screen surfaces (Browse/Help/preview) that own the whole area.
+        let sidebar_w = Self::sidebar_width(editor, area);
+        let (body, panel) = if sidebar_w > 0 {
+            let cols = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Length(sidebar_w), Constraint::Min(1)])
+                .split(rows[0]);
+            (cols[1], cols[0])
+        } else {
+            (
+                rows[0],
+                Rect {
+                    x: rows[0].x,
+                    y: rows[0].y,
+                    width: 0,
+                    height: 0,
+                },
+            )
+        };
+
+        // 📌 並びは `[body, shortcuts, status, sidebar]` —— 既存の呼び手（テストを含む）は
+        // 先頭 3 つを今までどおり読む。サイドバーは幅 0 のときに描かれない。
+        vec![body, rows[1], rows[2], panel].into()
+    }
+
+    /// Rows the panel occupies: 0 when it is hidden, off, or the terminal is narrow.
+    fn sidebar_width(editor: &EditorState, area: Rect) -> u16 {
+        let Some(sidebar) = editor.sidebar.as_ref() else {
+            return 0;
+        };
+        if !sidebar.visible || area.width < crate::sidebar::MIN_TOTAL_WIDTH {
+            return 0;
+        }
+        if !mode_draws_sidebar(editor.mode) {
+            return 0;
+        }
+        sidebar.width_for(area.width)
     }
 
     pub fn render_body(editor: &mut EditorState, f: &mut Frame, area: Rect) {
@@ -90,6 +132,25 @@ impl Renderer {
     pub fn render_status_bar(editor: &EditorState, f: &mut Frame, area: Rect) {
         footer::render_status_bar(editor, f, area);
     }
+
+    /// The left panel. A zero-width area (see `editor_layout`) draws nothing.
+    pub fn render_sidebar(editor: &EditorState, f: &mut Frame, area: Rect) {
+        sidebar::render_sidebar(editor, f, area);
+    }
+}
+
+/// The surfaces that own the whole area — the sidebar would only steal columns from a
+/// pager, the help screen, or the tree Browser itself.
+fn mode_draws_sidebar(mode: EditorMode) -> bool {
+    !matches!(
+        mode,
+        EditorMode::Browse
+            | EditorMode::Help
+            | EditorMode::Markdown
+            | EditorMode::View
+            | EditorMode::DiffReview
+            | EditorMode::DiffCommitMsg
+    )
 }
 
 fn normal_shortcut_rows(is_narrow: bool, mode: EditorMode) -> u16 {

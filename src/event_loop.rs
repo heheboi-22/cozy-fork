@@ -49,12 +49,20 @@ fn fetch_generation() -> u64 {
     }
 }
 
+/// Whether a folder tree is still filling in from its background index. Browse owns the
+/// whole screen while it does; the sidebar keeps indexing under the buffer, and its rows
+/// have to appear without a keypress just the same.
 fn browse_is_indexing(editor: &EditorState) -> bool {
-    editor.mode == EditorMode::Browse
+    let browsing = editor.mode == EditorMode::Browse
         && editor
             .browse_tree
             .as_ref()
-            .is_some_and(|tree| tree.is_indexing())
+            .is_some_and(|tree| tree.is_indexing());
+    let sidebar = editor
+        .sidebar
+        .as_ref()
+        .is_some_and(|s| s.visible && s.explorer.is_indexing());
+    browsing || sidebar
 }
 
 /// The modes a wheel scrolls (↑/↓ → `Action::Wheel`). Elsewhere the terminal
@@ -106,6 +114,7 @@ fn run_loop<W: Write>(
                 Renderer::render_body(editor, f, chunks[0]);
                 Renderer::render_shortcuts(editor, f, chunks[1]);
                 Renderer::render_status_bar(editor, f, chunks[2]);
+                Renderer::render_sidebar(editor, f, chunks[3]);
             })?;
             needs_redraw = false;
         }
@@ -189,6 +198,11 @@ fn run_loop<W: Write>(
                 // The blink waits: it would toggle five times a second here.
                 if let Some(tree) = editor.browse_tree.as_mut() {
                     tree.tick();
+                }
+                if let Some(sidebar) = editor.sidebar.as_mut()
+                    && sidebar.visible
+                {
+                    sidebar.explorer.tick();
                 }
                 needs_redraw = true;
             } else if editor.config.cursor_blink.unwrap_or(false) {

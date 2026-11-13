@@ -769,18 +769,20 @@ fn render_edit_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {
             )),
             layout[0],
         );
+        // The panel is the one surface with no other way in, so it gets a slot on the
+        // wide footer — but only where the row has room for it (≥100 columns).
+        let mut second = vec![
+            (crate::shortcuts::EditorAction::EnterHelp, "Help"),
+            (crate::shortcuts::EditorAction::DeleteLine, "Cut Line"),
+            (crate::shortcuts::EditorAction::EnterGoto, "Jump"),
+            (crate::shortcuts::EditorAction::EnterGlide, "Glide"),
+            (crate::shortcuts::EditorAction::Undo, "Undo"),
+        ];
+        if area.width >= 100 && editor.sidebar.is_some() {
+            second.push((crate::shortcuts::EditorAction::SidebarFiles, "Files"));
+        }
         f.render_widget(
-            Paragraph::new(wide_actions(
-                editor,
-                narrow,
-                &[
-                    (crate::shortcuts::EditorAction::EnterHelp, "Help"),
-                    (crate::shortcuts::EditorAction::DeleteLine, "Cut Line"),
-                    (crate::shortcuts::EditorAction::EnterGoto, "Jump"),
-                    (crate::shortcuts::EditorAction::EnterGlide, "Glide"),
-                    (crate::shortcuts::EditorAction::Undo, "Undo"),
-                ],
-            )),
+            Paragraph::new(wide_actions(editor, narrow, &second)),
             layout[1],
         );
     }

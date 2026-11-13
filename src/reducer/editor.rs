@@ -322,6 +322,9 @@ pub fn apply_editor_event(editor: &mut EditorState, action: &Action) -> EventRes
                     // enter_mode() clears status_message, so switch to Edit FIRST,
                     // then set the success message so it survives into Edit mode.
                     editor.enter_mode(editor.home_mode());
+                    // The file just stopped being modified: refresh the source-control
+                    // list if it is on screen, so the row does not lie until `r`.
+                    crate::reducer::sidebar::after_save(editor);
                     crate::reducer::status::set_success(editor, "Saved", &display_name);
                 }
                 Err(e) => {

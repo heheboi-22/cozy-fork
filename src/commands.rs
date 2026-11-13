@@ -66,6 +66,21 @@ pub static COMMANDS: &[CommandSpec] = &[
         action: CommandAction::EnterMode(EditorMode::Open),
     },
     CommandSpec {
+        label: "View.SidebarFiles",
+        keywords: &["explorer", "sidebar", "panel", "tree", "files"],
+        action: CommandAction::Dispatch(Action::SidebarFocus(crate::sidebar::SidebarTab::Files)),
+    },
+    CommandSpec {
+        label: "View.SidebarGit",
+        keywords: &["git", "source control", "changes", "sidebar", "status"],
+        action: CommandAction::Dispatch(Action::SidebarFocus(crate::sidebar::SidebarTab::Git)),
+    },
+    CommandSpec {
+        label: "View.RefreshGit",
+        keywords: &["git", "refresh", "status", "reload"],
+        action: CommandAction::Dispatch(Action::SidebarRefresh),
+    },
+    CommandSpec {
         label: "Browse.Files",
         keywords: &["folder", "directory", "tree"],
         action: CommandAction::EnterMode(EditorMode::Browse),

@@ -68,6 +68,34 @@ cozy <folder>
 - TOML configuration and per-action key overrides
 - Reducer-based architecture with focused tests for cursor behavior, motions, editing, replace, clipboard, and browse mode
 
+## Sidebar
+
+The left panel is the VS Code shape: an explorer tree beside the buffer, and a Source
+Control tab over the same folder.
+
+```
+≡ Files  ⑂ Git 7                 │  1  fn main() { println!("hi"); }
+                                 │  2
+▾ input-produksi                 │  3
+  ▸ .vscode                      │  4
+  ▾ src                          │  5
+    rs main.rs                   │  6
+    md README.md                 │  7
+    tm .env                      │  8
+Ctrl+S Save   Ctrl+B Browse ...  │
+```
+
+- `Alt+B` — focus the **Files** tab (again to hide the panel)
+- `Alt+G` — focus the **Git** tab: `git status` grouped by directory, with `M`/`A`/`D`/`U`
+  letters, a per-folder count, and the branch name
+- `j`/`k` or ↑/↓ move, `Enter`/`l` open a file (or expand a folder), `h` collapse,
+  `Tab` switches tabs, `r` re-reads `git status`, `Esc` hands the keyboard back
+
+Type badges take the place of an icon font: two coloured letters (`rs`, `md`, `ts`, …), so
+the tree reads the same in any terminal. Hidden entries are shown (`.vscode`, `.env`) but
+`.git` never is. The panel steps aside on terminals narrower than 70 columns, and
+`COZY_NO_SIDEBAR=1` turns it off entirely.
+
 ## Screenshots
 
 Edit mode is the default: open a file and type directly, with line numbers and a compact shortcut footer.
@@ -138,6 +166,13 @@ The source of truth for key bindings is `src/shortcuts.rs` (`get_shortcuts()`). 
 - `Ctrl+R`: Replace mode; press again to replace all
 - `Tab` in replace mode: Switch between query and replacement fields
 - `Enter` in replace mode: Replace current match
+
+### Sidebar
+
+- `Alt+B`: Sidebar — Files (focus; again hides the panel)
+- `Alt+G`: Sidebar — Git changes
+- `Tab`: switch Files ↔ Git while the panel has the keyboard
+- `Esc`: return the keyboard to the buffer
 
 ### View And Help
 

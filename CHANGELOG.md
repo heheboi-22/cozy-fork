@@ -1,5 +1,14 @@
 # Changelog
 
+## Unreleased (fork)
+
+### Added
+
+- **A left sidebar — the VS Code shape, in the terminal.** The editor gains a panel beside the buffer with two tabs: **Files**, an explorer over the working folder, and **Git**, the folder's `git status` grouped into a tree with `M`/`A`/`D`/`U` letters, a per-folder change count, and the branch name. `Alt+B` focuses Files, `Alt+G` focuses Git (again hides the panel); `j`/`k`, `Enter`, `h`, `Tab`, `r` drive it and `Esc` hands the keyboard back to the text. File types are marked with a two-letter coloured badge (`rs`, `md`, `ts`, …) instead of an icon font, so nothing has to be installed for the tree to read correctly. The panel steps aside below 70 columns and can be turned off with `COZY_NO_SIDEBAR=1`; compact/mobile hosts (`COZY_COMPACT`) never build one.
+- **The explorer shows hidden entries** (`.vscode`, `.env`, `.github`) while `.git` is still excluded, matching VS Code's default `files.exclude`. This is an argument on `BrowseTree` (`build_lazy(root, skip_hidden)`), so the full-screen Browser keeps its old rule and the sidebar gets the new one.
+- Saving with the Git tab on screen refreshes the change list, so a file's row goes from modified to clean without pressing `r`.
+- Command palette entries `View.SidebarFiles`, `View.SidebarGit`, `View.RefreshGit`, and the `[keys]` names `sidebar_files` / `sidebar_git`.
+
 ## v0.2.38
 
 ### Added
