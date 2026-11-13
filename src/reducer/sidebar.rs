@@ -959,6 +959,61 @@ mod rendered_frame_tests {
         assert!(!editor.sidebar_folded(), "Markdown memakai seluruh layar");
     }
 
+    /// 🚨 With the panel folded, cozy used to release the mouse — so a click went to the
+    /// terminal (which selected its own block over the line numbers) and the editor's
+    /// cursor never moved. The editor now keeps the pointer, and its own selection is
+    /// text-only.
+    #[test]
+    fn the_editor_keeps_the_mouse_when_the_panel_is_folded() {
+        let (_tmp, mut editor) = drawn(110, 20);
+        editor.sidebar.as_mut().unwrap().focused = true;
+        fold_panel(&mut editor);
+        assert!(!editor.sidebar.as_ref().unwrap().visible, "panel terlipat");
+        assert!(editor.wants_mouse(), "editor tetap memegang mouse");
+
+        // A click that cozy receives moves the cursor (before the fix it never arrived).
+        editor.buffer =
+            crate::state::TextBuffer::from_lines((1..=20).map(|n| format!("line {n}")).collect());
+        // Geometry as the *next* frame records it (the panel gone, the text full width).
+        let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
+        terminal
+            .draw(|f| {
+                editor.ui_hit = UiHit {
+                    screen: crate::sidebar::Area::from(f.area()),
+                    ..Default::default()
+                };
+                let chunks = Renderer::editor_layout(f.area(), &editor);
+                Renderer::render_body(&mut editor, f, chunks[0]);
+                Renderer::render_shortcuts(&editor, f, chunks[1]);
+                Renderer::render_status_bar(&mut editor, f, chunks[2]);
+                Renderer::render_sidebar(&mut editor, f, chunks[3]);
+            })
+            .unwrap();
+        let _ = mouse_down(&mut editor, MouseButton::Left, 20, 5);
+        assert_eq!(editor.cursor.y, 5, "klik mendarat di baris yang diklik");
+    }
+
+    /// …but not where cozy has nothing to do with the pointer: the terminal keeps its own
+    /// drag-select there (preview, help, `czv`, the full-screen Browser).
+    #[test]
+    fn reading_views_leave_the_mouse_to_the_terminal() {
+        let (_tmp, mut editor) = drawn(110, 20);
+        for mode in [
+            EditorMode::Markdown,
+            EditorMode::Help,
+            EditorMode::View,
+            EditorMode::Browse,
+        ] {
+            editor.enter_mode(mode);
+            assert!(
+                !editor.wants_mouse(),
+                "{mode:?} tidak boleh mengambil mouse"
+            );
+        }
+        editor.enter_mode(EditorMode::Edit);
+        assert!(editor.wants_mouse());
+    }
+
     /// A wide window keeps the old behaviour: the panel folds away, and the same key
     /// brings it back.
     #[test]

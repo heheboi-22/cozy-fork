@@ -468,6 +468,14 @@ impl EditorState {
         visible && self.panel_allowed()
     }
 
+    /// Does cozy want the pointer here? Then it takes mouse reporting, and a drag is
+    /// **cozy's** selection — text only, gutter excluded, copied on release. If it did not,
+    /// the terminal would draw its own block over the line numbers, which is a rectangle
+    /// of the screen rather than a range of the file.
+    pub fn wants_mouse(&self) -> bool {
+        self.sidebar_on_screen() || matches!(self.mode, EditorMode::Edit | EditorMode::Glide)
+    }
+
     /// Could the panel be on screen in this mode at all? The full-screen surfaces own the
     /// whole area, so the panel is not "hidden" there — there is nowhere to put it.
     pub fn panel_allowed(&self) -> bool {

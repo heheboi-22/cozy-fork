@@ -167,9 +167,11 @@ file as the **detail**, and `‹ Files` in the status bar (or `Esc`) walks back.
 corner button means "fold the panel away" on a wide screen and "back to the list" on a
 narrow one, so there is always something to click.
 
-⚠️ While the panel is up the terminal hands the mouse to cozy, so the terminal's own
-drag-to-select needs **Shift**. Hiding the panel (`Alt+B` twice) gives plain drag-select
-back; the reading views and `czv` never take the mouse.
+⚠️ While **editing** — panel up *or* folded — cozy takes the mouse, so the terminal's own
+drag-to-select needs **Shift**. That is the point: a plain drag then selects *in cozy*,
+where the band covers the text only (no line-number gutter) and is copied on release,
+instead of the terminal painting a block over the whole screen row. The reading views
+(Markdown preview, Help, `czv`, the full-screen Browser) never take the mouse.
 
 Type badges take the place of an icon font: two coloured letters (`rs`, `md`, `ts`, …), so
 the tree reads the same in any terminal. Hidden entries are shown (`.vscode`, `.env`) but

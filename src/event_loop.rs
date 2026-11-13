@@ -172,8 +172,11 @@ fn run_loop<W: Write>(
             Write::flush(backend)?;
             *wheel_on = want;
         }
-        // Clicks belong to the panel while the panel is up; nothing else asks for them.
-        let want_mouse = report_wheel && editor.sidebar_on_screen();
+        // The pointer belongs to cozy wherever it has something to do with it: the panel,
+        // or the text (its own drag-selection, which keeps the line-number gutter out —
+        // the terminal's would paint a block over it). Reading views and `czv` still leave
+        // the mouse alone.
+        let want_mouse = report_wheel && editor.wants_mouse();
         if want_mouse != *mouse_on {
             let backend = terminal.backend_mut();
             backend.write_all(if want_mouse { MOUSE_ON } else { MOUSE_OFF })?;
@@ -356,16 +359,14 @@ mod tests {
         assert!(on < off);
     }
 
-    /// 読むモードでもマウスは端末に残す（ドラッグで選んでコピーできるように）——
-    /// マウス報告（`1000`/`1002`/`1003`/`1006`）はどのモードでも頼まない。
+    /// 読むモードはマウスを端末に残す（ドラッグで選んでコピーできるように）——
+    /// マウス報告（`1000`/`1002`/`1003`/`1006`）は頼まない。
+    ///
+    /// ⭐ `Edit` はここに入らない: 編集面は cozy が自分で選択を持つ（行番号の gutter を
+    /// 巻き込まないため）。`the_editor_keeps_the_mouse` を見よ。
     #[test]
-    fn no_mode_takes_the_mouse_from_the_terminal() {
-        for mode in [
-            EditorMode::Help,
-            EditorMode::Markdown,
-            EditorMode::View,
-            EditorMode::Edit,
-        ] {
+    fn reading_modes_take_no_mouse_from_the_terminal() {
+        for mode in [EditorMode::Help, EditorMode::Markdown, EditorMode::View] {
             let out = bytes_written(mode, true);
             for report in [
                 &b"\x1b[?1000h"[..],
@@ -383,11 +384,25 @@ mod tests {
         }
     }
 
-    /// 対照: 編集のモードでは頼まない（マウスでの文字の選択を端末に残す）。
+    /// ⭐ 対照: 編集面はマウス報告を**頼む**（クリックが届き、ドラッグは cozy の選択に
+    /// なる）。ホイールだけは頼まない —— 編集面はマウスホイールを自分で受け取るので、
+    /// 端末の alternate-scroll（`?1007`）に変換させる必要がない。
     #[test]
-    fn an_editing_mode_leaves_the_mouse_to_the_terminal() {
+    fn the_editor_takes_the_mouse_but_not_the_wheel() {
         let out = bytes_written(EditorMode::Edit, true);
-        assert_eq!(find(&out, WHEEL_ON), None);
+        for report in [&b"\x1b[?1000h"[..], b"\x1b[?1002h", b"\x1b[?1006h"] {
+            assert!(
+                find(&out, report).is_some(),
+                "編集面がマウス報告 {:?} を頼んでいない",
+                String::from_utf8_lossy(report)
+            );
+        }
+        assert_eq!(find(&out, WHEEL_ON), None, "編集面はホイールを頼まない");
+        // …and it gives the mouse back on the way out.
+        assert!(
+            find(&out, MOUSE_OFF).is_some(),
+            "抜けるときに解除していない"
+        );
     }
 
     /// Records how long each poll was asked to wait; the second poll ends the loop.
