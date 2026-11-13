@@ -268,6 +268,10 @@ pub struct EditorState {
     pub sidebar_drag: bool,
     /// The single-file diff the Source Control view opened, if any.
     pub file_diff: Option<crate::state::diff::FileDiffView>,
+    /// The wheel moved the viewport away from the cursor. While this is set,
+    /// `adjust_scroll` leaves the offset alone — the view stays where the wheel put it
+    /// until the next keypress asks for the cursor back.
+    pub scroll_parked: bool,
 }
 
 pub(crate) struct EditorStateInit {
@@ -529,6 +533,7 @@ impl EditorState {
             ui_hit: crate::sidebar::UiHit::default(),
             sidebar_drag: false,
             file_diff: None,
+            scroll_parked: false,
         }
         .with_recovery_offer()
         // ⭐ 設定の苦情も**画面へ**（`eprintln!` は TUI の絵を壊す・`#2`）。
@@ -780,6 +785,11 @@ impl EditorState {
 
     pub fn adjust_scroll(&mut self, viewport_height: usize) {
         if viewport_height == 0 {
+            return;
+        }
+        // The wheel owns the viewport until something else moves the cursor: pulling the
+        // view back here would undo the scroll on the very next frame.
+        if self.scroll_parked {
             return;
         }
 

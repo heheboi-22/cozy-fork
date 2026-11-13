@@ -116,18 +116,41 @@ fn the_view_mode_scrolls_its_text() {
     assert_eq!(editor.scroll_offset, 3);
 }
 
-/// 編集中はカーソルを動かす（argotty のスワイプが以前から送っていた ↑/↓ と同じ）。
-/// ⚠️ 端末のホイールは編集中には届かない —— 頼むのは読むモードの間だけ（`event_loop`）。
+/// ⭐ 編集中のホイールは**視界だけ**を動かす。カーソルは動かない（VS Code / WA-Bot と
+/// 同じ）。読み返すためにスクロールしただけでカーソルが文書の別の場所へ行ってはいけない。
 #[test]
-fn the_wheel_moves_the_cursor_while_editing() {
+fn the_wheel_scrolls_the_view_without_moving_the_cursor() {
     let mut editor = EditorState::new(None);
     editor.buffer = TextBuffer::from_lines((1..=50).map(|n| n.to_string()).collect());
+    editor.page_size = 10;
     editor.enter_mode(EditorMode::Edit);
     reduce(&mut editor, Action::Wheel(3));
-    assert_eq!(editor.cursor.y, 3);
-    reduce(&mut editor, Action::Wheel(-2));
-    assert_eq!(editor.cursor.y, 1);
+    assert_eq!(editor.scroll_offset, 3, "視界が 3 行ぶん下へ");
+    assert_eq!(editor.cursor.y, 0, "カーソルは 1 行目のまま");
+    reduce(&mut editor, Action::Wheel(-1));
+    assert_eq!(editor.scroll_offset, 2);
+    assert_eq!(editor.cursor.y, 0);
     assert!(!editor.modified);
+}
+
+/// 視界がカーソルから離れている間は、描画の `adjust_scroll` が引き戻さない。
+#[test]
+fn a_parked_viewport_stays_put_until_the_keyboard_asks_for_the_cursor() {
+    let mut editor = EditorState::new(None);
+    editor.buffer = TextBuffer::from_lines((1..=50).map(|n| n.to_string()).collect());
+    editor.page_size = 10;
+    editor.enter_mode(EditorMode::Edit);
+    reduce(&mut editor, Action::Wheel(5));
+    assert!(editor.scroll_parked);
+    editor.adjust_scroll(10);
+    assert_eq!(editor.scroll_offset, 5, "ditarik balik ke kursor?");
+
+    // A keypress that moves the cursor hands the viewport back to `adjust_scroll`, which
+    // pulls the view to where the cursor is (line 2 after one `j`).
+    reduce(&mut editor, Action::MoveDown);
+    assert!(!editor.scroll_parked);
+    editor.adjust_scroll(10);
+    assert_eq!(editor.scroll_offset, 1, "kursor kembali terlihat");
 }
 
 /// 他のモード（ここでは保存の欄）では何もしない。

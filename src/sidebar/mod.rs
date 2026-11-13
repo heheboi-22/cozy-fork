@@ -27,6 +27,9 @@ pub const DEFAULT_WIDTH: u16 = 34;
 pub const MAX_WIDTH: u16 = 60;
 /// Total terminal width below which the sidebar steps aside entirely.
 pub const MIN_TOTAL_WIDTH: u16 = 70;
+/// How long a hover highlight takes to fade in. Short on purpose: a row should feel like it
+/// lights up under the pointer, not like it is loading.
+pub const HOVER_FADE: std::time::Duration = std::time::Duration::from_millis(120);
 
 // ── screen geometry (mouse) ────────────────────────────────────────────────────
 
@@ -260,6 +263,8 @@ pub struct GitChanges {
     pub entries: Vec<GitEntry>,
     pub nodes: Vec<GitNode>,
     pub selected: usize,
+    /// First visible row — the viewport, which the wheel moves without touching `selected`.
+    pub scroll: usize,
     pub expanded: HashSet<usize>,
     pub error: Option<String>,
 }
@@ -575,7 +580,19 @@ impl GitChanges {
         }
     }
 
+    /// Move the viewport, not the selection. The renderer clamps the far end (it knows
+    /// how tall the panel is).
+    pub fn scroll_by(&mut self, delta: isize) {
+        let next = if delta.is_negative() {
+            self.scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.scroll.saturating_add(delta as usize)
+        };
+        self.scroll = next.min(self.visible().len().saturating_sub(1));
+    }
+
     pub fn goto_top(&mut self) {
+        self.scroll = 0;
         if let Some(&first) = self.visible().first() {
             self.selected = first;
         }
@@ -775,6 +792,13 @@ pub struct Sidebar {
     pub width: u16,
     pub explorer: BrowseTree,
     pub git: GitChanges,
+    /// The row under the pointer, if any. Independent of the selection: the pointer
+    /// lights a row up, the keyboard selects one, and scrolling moves neither.
+    pub hover: Option<usize>,
+    /// The header tab under the pointer.
+    pub hover_tab: Option<SidebarTab>,
+    /// When the pointer last landed on a row — the hover fade counts from here.
+    pub hover_at: Option<std::time::Instant>,
 }
 
 impl Sidebar {
@@ -796,7 +820,20 @@ impl Sidebar {
             // `skip_hidden = false`: a VS Code-like explorer shows `.vscode`, `.env`.
             explorer: BrowseTree::build_lazy(root, false),
             git,
+            hover: None,
+            hover_tab: None,
+            hover_at: None,
         }
+    }
+
+    /// Time since the pointer last changed rows, for the hover fade.
+    pub fn hover_age(&self) -> Option<std::time::Duration> {
+        self.hover_at.map(|t| t.elapsed())
+    }
+
+    /// Whether a hover highlight is still fading in, so the loop knows to wake for it.
+    pub fn hover_animating(&self) -> bool {
+        self.hover.is_some() && self.hover_age().is_some_and(|age| age < HOVER_FADE)
     }
 
     /// Re-read `git status`, keeping the cursor on the same change when it is still there.

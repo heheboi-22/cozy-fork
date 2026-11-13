@@ -90,6 +90,8 @@ pub struct BrowseTree {
     pub nodes: Vec<BrowseNode>,
     /// カーソル位置のノード index（常に可視ノードのいずれか）。
     pub selected: usize,
+    /// 可視列の先頭（ビューポート）。ホイールはこれを動かし、**選択は動かさない**。
+    pub scroll: usize,
     /// `/` 絞り込み文字列（空＝絞り込みなし）。書き換えは [`Self::begin_filter`] ほかを通す。
     pub filter: String,
     /// `/` 絞り込み入力を受け付けている最中か。
@@ -167,6 +169,7 @@ impl BrowseTree {
             }],
             root,
             selected: 0,
+            scroll: 0,
             filter: String::new(),
             filtering: false,
             expanded,
@@ -337,8 +340,22 @@ impl BrowseTree {
         }
     }
 
+    /// ビューポートを動かす（選択はそのまま）。上限は描画側が知っているので、
+    /// ここでは可視列の末尾までで止める。
+    pub fn scroll_by(&mut self, delta: isize) {
+        self.absorb();
+        let len = self.visible_nodes().len();
+        let next = if delta.is_negative() {
+            self.scroll.saturating_sub(delta.unsigned_abs())
+        } else {
+            self.scroll.saturating_add(delta as usize)
+        };
+        self.scroll = next.min(len.saturating_sub(1));
+    }
+
     pub fn goto_top(&mut self) {
         self.absorb();
+        self.scroll = 0;
         if let Some(&first) = self.visible_nodes().first() {
             self.selected = first;
         }

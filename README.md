@@ -109,7 +109,11 @@ The panel is **mouse-first**:
 
 - click a row — a folder opens or closes, a file opens, a change opens its diff
 - click a tab in the header — switches views (clicking the open tab never closes it)
-- wheel over the panel — walks the tree
+- wheel over the panel — scrolls the list; the **selection stays put**, so reading never
+  changes what Enter would open (the same is true of the wheel in the buffer: it scrolls the
+  viewport, the cursor does not move until you press a key)
+- hovering a row lights it up (a short fade); hover is the pointer's state, never the
+  scroll's, and moving within the same row does not repaint
 - drag the panel's right border — resizes it (never past half the screen)
 - click in the text — the cursor goes where the character was drawn (soft wrap included)
 

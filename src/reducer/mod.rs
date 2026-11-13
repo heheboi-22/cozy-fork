@@ -342,6 +342,15 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
     // dispatch, so a fresh yank in this same call can re-arm it for one frame.
     editor.yank_highlight = None;
 
+    // A scrolled-away viewport snaps back as soon as anything but the pointer asks for the
+    // cursor. (Hover and drag must not: they are not about the text at all.)
+    if !matches!(
+        action,
+        Action::Wheel(_) | Action::MouseScroll(..) | Action::MouseMove(..) | Action::MouseDrag(..)
+    ) {
+        editor.scroll_parked = false;
+    }
+
     // Dispatch to buffer reducer for editing actions
     match action {
         Action::InsertChar(c) => match editor.mode {
@@ -612,16 +621,18 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
                 editor.mode,
                 crate::state::EditorMode::Edit | crate::state::EditorMode::Glide
             ) {
-                // 編集中はカーソルを動かす —— argotty の指のスワイプが以前から送っていた ↑/↓ と同じ。
-                // 端末のホイールはここへは来ない（端末に頼むのは読むモードの間だけ・`event_loop`）。
-                let step = if delta.is_negative() {
-                    Action::MoveUp
+                // ⭐ **ホイールは視界を動かす。カーソルは動かさない**（VS Code / WA-Bot と同じ）。
+                // 以前は 1 目盛りごとに ↑/↓ を押していたので、読み返そうとスクロールした
+                // だけでカーソルが文書の別の場所へ行っていた。
+                let page = editor.page_size.max(1);
+                let max = editor.buffer.lines.len().saturating_sub(page);
+                let next = if delta.is_negative() {
+                    editor.scroll_offset.saturating_sub(delta.unsigned_abs())
                 } else {
-                    Action::MoveDown
+                    editor.scroll_offset.saturating_add(delta as usize)
                 };
-                for _ in 0..delta.unsigned_abs() {
-                    editor::apply_editor_event(editor, &step);
-                }
+                editor.scroll_offset = next.min(max);
+                editor.scroll_parked = true;
             }
             EventResult::Continue
         }
@@ -755,6 +766,7 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         Action::PreviousHunk => filediff::next_hunk(editor, false),
         Action::CloseFileDiff => filediff::close(editor),
         Action::MouseDown(button, col, row) => sidebar::mouse_down(editor, button, col, row),
+        Action::MouseMove(col, row) => sidebar::mouse_move(editor, col, row),
         Action::MouseDrag(col, row) => sidebar::mouse_drag(editor, col, row),
         Action::MouseUp => sidebar::mouse_up(editor),
         Action::MouseScroll(delta, col, row) => sidebar::mouse_scroll(editor, delta, col, row),

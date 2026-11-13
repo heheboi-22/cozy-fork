@@ -319,27 +319,35 @@ pub fn mouse_up(editor: &mut EditorState) -> EventResult {
     EventResult::Continue
 }
 
-/// The wheel. Over the panel it walks the tree; anywhere else it means exactly what it
-/// always meant (scroll the reading view, or move the cursor while editing).
+/// The pointer moved. Hover is its own state: it never moves the selection and never
+/// starts a drag.
+pub fn mouse_move(editor: &mut EditorState, col: u16, row: u16) -> EventResult {
+    let hit = editor.ui_hit.clone();
+    let Some(sidebar) = editor.sidebar.as_mut() else {
+        return EventResult::Continue;
+    };
+    let node = hit.row_at(col, row).map(|SidebarHit::Row(node)| node);
+    let tab = hit.tab_at(col, row);
+    if sidebar.hover != node || sidebar.hover_tab != tab {
+        sidebar.hover = node;
+        sidebar.hover_tab = tab;
+        sidebar.hover_at = Some(std::time::Instant::now());
+    }
+    EventResult::Continue
+}
+
+/// The wheel. Over the panel it moves the *viewport* — the selection stays where it was,
+/// so scrolling to read does not decide anything. Anywhere else it means what it always
+/// meant (scroll the reading view, or move the viewport while editing).
 pub fn mouse_scroll(editor: &mut EditorState, delta: isize, col: u16, row: u16) -> EventResult {
     let over_panel = editor.sidebar_on_screen() && editor.ui_hit.sidebar.contains(col, row);
     if over_panel {
         let Some(sidebar) = editor.sidebar.as_mut() else {
             return EventResult::Continue;
         };
-        let steps = delta.unsigned_abs();
-        for _ in 0..steps {
-            if delta.is_negative() {
-                match sidebar.tab {
-                    SidebarTab::Files => sidebar.explorer.move_up(),
-                    SidebarTab::Git => sidebar.git.move_up(),
-                }
-            } else {
-                match sidebar.tab {
-                    SidebarTab::Files => sidebar.explorer.move_down(),
-                    SidebarTab::Git => sidebar.git.move_down(),
-                }
-            }
+        match sidebar.tab {
+            SidebarTab::Files => sidebar.explorer.scroll_by(delta),
+            SidebarTab::Git => sidebar.git.scroll_by(delta),
         }
         return EventResult::Continue;
     }
@@ -440,12 +448,19 @@ mod tests {
         assert!(!editor.sidebar_drag);
     }
 
+    /// ⭐ Over the panel the wheel moves the viewport; the selection stays put, so
+    /// scrolling to read never changes what Enter would open.
     #[test]
-    fn the_wheel_over_the_panel_walks_the_tree() {
+    fn the_wheel_over_the_panel_scrolls_the_view_not_the_selection() {
         let (_tmp, mut editor) = editor_with_panel();
-        let before = editor.sidebar.as_ref().unwrap().explorer.selected;
+        let (before_sel, before_scroll) = {
+            let tree = &editor.sidebar.as_ref().unwrap().explorer;
+            (tree.selected, tree.scroll)
+        };
         let _ = mouse_scroll(&mut editor, 1, 5, 4);
-        assert_ne!(editor.sidebar.as_ref().unwrap().explorer.selected, before);
+        let tree = &editor.sidebar.as_ref().unwrap().explorer;
+        assert_eq!(tree.selected, before_sel, "seleksi tidak bergerak");
+        assert_eq!(tree.scroll, before_scroll + 1, "viewport bergerak");
     }
 
     /// Outside the panel the wheel is the wheel it has always been (cursor motion here).

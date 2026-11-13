@@ -64,9 +64,11 @@ pub fn map_event(editor: &EditorState, event: Event) -> InputEvent {
                 mouse.column,
                 mouse.row,
             )),
-            MouseEventKind::Drag(crossterm::event::MouseButton::Left) | MouseEventKind::Moved => {
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) => {
                 InputEvent::Action(Action::MouseDrag(mouse.column, mouse.row))
             }
+            // Hover: the pointer moved with no button held.
+            MouseEventKind::Moved => InputEvent::Action(Action::MouseMove(mouse.column, mouse.row)),
             MouseEventKind::Up(_) => InputEvent::Action(Action::MouseUp),
             _ => InputEvent::Ignore,
         },

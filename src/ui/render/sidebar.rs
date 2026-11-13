@@ -17,7 +17,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::sidebar::{Area, ChangeFlags, GitEntry, Sidebar, SidebarHit, SidebarTab};
+use crate::sidebar::{Area, ChangeFlags, GitEntry, HOVER_FADE, Sidebar, SidebarHit, SidebarTab};
 use crate::state::EditorState;
 
 const ACCENT: Color = Color::Rgb(97, 175, 239);
@@ -32,11 +32,15 @@ const DELETED: Color = Color::Rgb(224, 108, 117);
 const NEW: Color = Color::Rgb(230, 160, 80);
 const SELECTED_BG: Color = Color::Rgb(45, 50, 60);
 const SELECTED_BG_IDLE: Color = Color::Rgb(32, 34, 38);
+/// A row under the pointer: starts at the panel's own shade and warms up, so the row
+/// lights up rather than snapping on.
+const HOVER_FROM_RGB: (u8, u8, u8) = (26, 28, 33);
+const HOVER_TO_RGB: (u8, u8, u8) = (46, 51, 61);
 
 /// Draws the panel and records where it landed in `editor.ui_hit`, so a click can be
 /// answered without re-deriving the layout (see `SidebarHit` / `UiHit`).
 pub fn render_sidebar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
-    let Some(sidebar) = editor.sidebar.as_ref() else {
+    let Some(sidebar) = editor.sidebar.as_mut() else {
         return;
     };
     if !sidebar.visible || area.width < 12 || area.height < 3 {
@@ -139,7 +143,7 @@ fn marker(tab: SidebarTab) -> &'static str {
 }
 
 /// Draws the rows and returns what each one was, top to bottom.
-fn render_body(sidebar: &Sidebar, f: &mut Frame, area: Rect) -> Vec<SidebarHit> {
+fn render_body(sidebar: &mut Sidebar, f: &mut Frame, area: Rect) -> Vec<SidebarHit> {
     if area.height == 0 {
         return Vec::new();
     }
@@ -153,20 +157,30 @@ fn render_body(sidebar: &Sidebar, f: &mut Frame, area: Rect) -> Vec<SidebarHit> 
 
 // ── explorer ───────────────────────────────────────────────────────────────────
 
-fn explorer_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarHit>) {
-    let tree = &sidebar.explorer;
+fn explorer_lines(sidebar: &mut Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarHit>) {
     let width = area.width as usize;
     let height = area.height as usize;
+    // The viewport is the model's: the wheel moves it, the keyboard only pushes it when
+    // the selection would leave the screen.
+    let scroll = keep_visible(
+        sidebar.explorer.scroll,
+        {
+            let tree = &sidebar.explorer;
+            let visible = tree.visible_nodes();
+            let sel = visible
+                .iter()
+                .position(|&i| i == tree.selected)
+                .unwrap_or(0);
+            (sel, visible.len())
+        },
+        height,
+    );
+    sidebar.explorer.scroll = scroll;
+
+    let tree = &sidebar.explorer;
     let visible = tree.visible_nodes();
-    let sel_pos = visible
-        .iter()
-        .position(|&i| i == tree.selected)
-        .unwrap_or(0);
-    let scroll = if sel_pos < height {
-        0
-    } else {
-        sel_pos - height + 1
-    };
+    let hover = sidebar.hover;
+    let hover_bg = hover_color(sidebar.hover_age());
 
     let mut lines = Vec::with_capacity(height);
     let mut hits = Vec::with_capacity(height);
@@ -200,13 +214,13 @@ fn explorer_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<Sid
                 Style::default().fg(file_color(flags)),
             ));
         }
-        lines.push(row(
-            spans,
-            Vec::new(),
-            width,
+        let bg = row_bg(
             idx == tree.selected,
             sidebar.focused,
-        ));
+            hover == Some(idx),
+            hover_bg,
+        );
+        lines.push(row(spans, Vec::new(), width, bg));
         hits.push(SidebarHit::Row(idx));
     }
     if lines.is_empty() {
@@ -250,10 +264,24 @@ fn flags_for(sidebar: &Sidebar, path: &std::path::Path) -> ChangeFlags {
 
 // ── source control ─────────────────────────────────────────────────────────────
 
-fn git_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarHit>) {
-    let git = &sidebar.git;
+fn git_lines(sidebar: &mut Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarHit>) {
     let width = area.width as usize;
     let height = area.height as usize;
+    let scroll = keep_visible(
+        sidebar.git.scroll,
+        {
+            let git = &sidebar.git;
+            let visible = git.visible();
+            let sel = visible.iter().position(|&i| i == git.selected).unwrap_or(0);
+            (sel, visible.len())
+        },
+        height,
+    );
+    sidebar.git.scroll = scroll;
+
+    let git = &sidebar.git;
+    let hover = sidebar.hover;
+    let hover_bg = hover_color(sidebar.hover_age());
 
     if !git.repo {
         let msg = match &git.error {
@@ -276,12 +304,6 @@ fn git_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarH
     }
 
     let visible = git.visible();
-    let sel_pos = visible.iter().position(|&i| i == git.selected).unwrap_or(0);
-    let scroll = if sel_pos < height {
-        0
-    } else {
-        sel_pos - height + 1
-    };
 
     let mut lines = Vec::with_capacity(height);
     let mut hits = Vec::with_capacity(height);
@@ -338,13 +360,13 @@ fn git_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarH
                 tail = counts(entry.added, entry.deleted, false);
             }
         }
-        lines.push(row(
-            spans,
-            tail,
-            width,
+        let bg = row_bg(
             idx == git.selected,
             sidebar.focused,
-        ));
+            hover == Some(idx),
+            hover_bg,
+        );
+        lines.push(row(spans, tail, width, bg));
         hits.push(SidebarHit::Row(idx));
     }
     (lines, hits)
@@ -383,8 +405,7 @@ fn row(
     spans: Vec<Span<'static>>,
     tail: Vec<Span<'static>>,
     width: usize,
-    selected: bool,
-    focused: bool,
+    bg: Option<Color>,
 ) -> Line<'static> {
     // One column of breathing room before the panel's border: a count jammed against the
     // border reads as part of it.
@@ -412,17 +433,58 @@ fn row(
     if total < width {
         all.push(Span::raw(" ".repeat(width - total)));
     }
-    if selected {
-        let bg = if focused {
-            SELECTED_BG
-        } else {
-            SELECTED_BG_IDLE
-        };
+    if let Some(bg) = bg {
         for span in &mut all {
             span.style = span.style.bg(bg);
         }
     }
     Line::from(all)
+}
+
+/// Where the viewport should start: the wheel's offset, but never so far that the
+/// selection is off screen (a keyboard move must not scroll the cursor away).
+fn keep_visible(scroll: usize, (sel, len): (usize, usize), height: usize) -> usize {
+    if height == 0 || len == 0 {
+        return 0;
+    }
+    // The last screenful: past this there would be blank rows below a short list.
+    let max = len.saturating_sub(height);
+    let mut scroll = scroll.min(max);
+    if sel < scroll {
+        scroll = sel;
+    } else if sel >= scroll + height {
+        scroll = sel + 1 - height;
+    }
+    scroll.min(max)
+}
+
+/// Which background a row gets: selection first, hover second, nothing otherwise.
+fn row_bg(selected: bool, focused: bool, hovered: bool, hover: Color) -> Option<Color> {
+    if selected {
+        Some(if focused {
+            SELECTED_BG
+        } else {
+            SELECTED_BG_IDLE
+        })
+    } else if hovered {
+        Some(hover)
+    } else {
+        None
+    }
+}
+
+/// The hover tint, faded in over [`HOVER_FADE`] from the panel's own shade.
+fn hover_color(age: Option<std::time::Duration>) -> Color {
+    let total = HOVER_FADE.as_millis().max(1) as f32;
+    let t = age
+        .map(|a| (a.as_millis() as f32 / total).clamp(0.0, 1.0))
+        .unwrap_or(1.0);
+    let mix = |from: u8, to: u8| (from as f32 + (to as f32 - from as f32) * t).round() as u8;
+    Color::Rgb(
+        mix(HOVER_FROM_RGB.0, HOVER_TO_RGB.0),
+        mix(HOVER_FROM_RGB.1, HOVER_TO_RGB.1),
+        mix(HOVER_FROM_RGB.2, HOVER_TO_RGB.2),
+    )
 }
 
 /// Cut spans to `budget` columns, trimming the span that overflows and dropping the rest.
@@ -532,7 +594,7 @@ mod render_tests {
             Span::styled("a", Style::default().fg(ADDED)),
             Span::styled("b", Style::default().fg(DELETED)),
         ];
-        let line = row(spans, Vec::new(), 10, false, false);
+        let line = row(spans, Vec::new(), 10, None);
         assert_eq!(line.spans[0].style.fg, Some(ADDED));
         assert_eq!(line.spans[1].style.fg, Some(DELETED));
         let width: usize = line
@@ -546,7 +608,7 @@ mod render_tests {
     #[test]
     fn the_tail_is_right_aligned_and_the_name_gives_way() {
         let spans = vec![Span::raw("a-very-long-file-name.rs")];
-        let line = row(spans, counts(190, 2, false), 20, false, false);
+        let line = row(spans, counts(190, 2, false), 20, None);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         // One column of margin before the border, so a count never touches it.
         assert!(text.ends_with("+190 −2 "), "angka tetap di kanan: {text:?}");
@@ -606,7 +668,7 @@ mod render_tests {
         };
 
         let area = ratatui::layout::Rect::new(0, 0, 40, 10);
-        let (lines, _) = explorer_lines(&sidebar, area);
+        let (lines, _) = explorer_lines(&mut sidebar, area);
         let color_of = |name: &str| -> Option<Color> {
             lines
                 .iter()
@@ -692,6 +754,76 @@ mod render_tests {
             Some(FOLDER),
             "folder tanpa perubahan"
         );
+    }
+
+    /// Hover is the pointer's state, not the scroll's: only the row under the pointer is
+    /// lit, and a fade that has finished stays at the final shade.
+    #[test]
+    fn hover_lights_up_only_the_row_under_the_pointer() {
+        use crate::state::EditorState;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use std::fs;
+
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-hover-")
+            .tempdir()
+            .unwrap();
+        for dir in ["one", "two"] {
+            fs::create_dir_all(tmp.path().join(dir)).unwrap();
+        }
+        let mut editor = EditorState::new(None);
+        let mut sidebar = Sidebar::new(tmp.path());
+        let target = sidebar
+            .explorer
+            .nodes
+            .iter()
+            .position(|n| n.name == "two")
+            .expect("folder two");
+        sidebar.hover = Some(target);
+        editor.sidebar = Some(sidebar);
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|f| render_sidebar(&mut editor, f, f.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row_of = |word: &str| -> Option<u16> {
+            (0..buffer.area.height).find(|&y| {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect();
+                row.contains(word)
+            })
+        };
+        let hovered = row_of("two").expect("baris two");
+        let other = row_of("one").expect("baris one");
+        let full = Color::Rgb(HOVER_TO_RGB.0, HOVER_TO_RGB.1, HOVER_TO_RGB.2);
+        assert_eq!(buffer[(3, hovered)].bg, full, "baris yang ditunjuk menyala");
+        assert_ne!(buffer[(3, other)].bg, full, "baris lain tidak");
+    }
+
+    #[test]
+    fn the_hover_fades_in_and_then_holds() {
+        let start = hover_color(Some(std::time::Duration::ZERO));
+        let mid = hover_color(Some(HOVER_FADE / 2));
+        let done = hover_color(Some(HOVER_FADE * 2));
+        assert_eq!(
+            start,
+            Color::Rgb(HOVER_FROM_RGB.0, HOVER_FROM_RGB.1, HOVER_FROM_RGB.2),
+            "mulai dari shade panel"
+        );
+        assert_eq!(
+            done,
+            Color::Rgb(HOVER_TO_RGB.0, HOVER_TO_RGB.1, HOVER_TO_RGB.2),
+            "selesai di shade hover"
+        );
+        // Halfway is strictly between the two.
+        let (Color::Rgb(r0, _, _), Color::Rgb(r1, _, _), Color::Rgb(rm, _, _)) = (start, done, mid)
+        else {
+            panic!("truecolor");
+        };
+        assert!(rm > r0 && rm < r1, "{r0} < {rm} < {r1}");
     }
 
     #[test]

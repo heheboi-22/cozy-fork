@@ -137,6 +137,7 @@ pub enum Action {
     // Mouse. Positions are screen cells; the reducer resolves them against
     // `EditorState::ui_hit` (the rectangles the last frame drew).
     MouseDown(MouseButton, u16, u16),
+    MouseMove(u16, u16),
     MouseDrag(u16, u16),
     MouseUp,
     MouseScroll(isize, u16, u16),

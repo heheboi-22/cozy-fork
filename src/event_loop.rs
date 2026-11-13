@@ -23,8 +23,14 @@ pub(crate) const WHEEL_OFF: &[u8] = b"\x1b[?1007l";
 /// to cozy — so drag-to-select belongs to the terminal again only with Shift held. Hiding
 /// the panel (`Alt+B` twice) gives plain drag-select back, and the pager (`czv`) and the
 /// reading views never ask for it at all.
-const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
-pub(crate) const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+/// `1003` is what makes hover possible: without any-event tracking the terminal only
+/// reports motion while a button is held, so a row could never light up under the pointer.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h";
+pub(crate) const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1003l\x1b[?1002l\x1b[?1000l";
+
+/// While a hover is fading in, wake this often so the fade is smooth — then fall back to
+/// the idle cadence (a fade must not keep the CPU warm afterwards).
+const ANIM_WAIT: Duration = Duration::from_millis(16);
 
 /// How long the loop waits for a key. Normally a second (the idle swap write and
 /// the cursor blink run on it); while Browse is still indexing in the background,
@@ -62,6 +68,11 @@ fn fetch_generation() -> u64 {
 /// Whether a folder tree is still filling in from its background index. Browse owns the
 /// whole screen while it does; the sidebar keeps indexing under the buffer, and its rows
 /// have to appear without a keypress just the same.
+/// A hover highlight is still fading in.
+fn hover_is_animating(editor: &EditorState) -> bool {
+    editor.sidebar.as_ref().is_some_and(|s| s.hover_animating())
+}
+
 fn browse_is_indexing(editor: &EditorState) -> bool {
     let browsing = editor.mode == EditorMode::Browse
         && editor
@@ -164,7 +175,10 @@ fn run_loop<W: Write>(
         // large folder takes, not as the normal cadence.
         let indexing = browse_is_indexing(editor);
         let arriving = images_are_arriving(editor);
-        let wait = if indexing || arriving {
+        let animating = hover_is_animating(editor);
+        let wait = if animating {
+            ANIM_WAIT
+        } else if indexing || arriving {
             INDEXING_WAIT
         } else {
             IDLE_WAIT
@@ -172,6 +186,10 @@ fn run_loop<W: Write>(
         if event_src.poll(wait)? {
             match input::map_event(editor, event_src.read()?) {
                 InputEvent::Action(action) => {
+                    // A pointer moving across the panel must not repaint the world: only a
+                    // change of hovered row is worth a frame.
+                    let hover_before = editor.sidebar.as_ref().and_then(|s| s.hover);
+                    let is_move = matches!(action, crate::action::Action::MouseMove(..));
                     if let EventResult::Exit = reduce(editor, action) {
                         // A deliberate exit: whatever the user wanted to keep is
                         // saved, and whatever they discarded they discarded on
@@ -195,7 +213,11 @@ fn run_loop<W: Write>(
                     // method, so a precise dirty signal (revision / InputEdit) is
                     // a follow-up — see cozy-notes treesitter-integration.md.
                     editor.highlighter.mark_dirty();
-                    needs_redraw = true;
+                    needs_redraw = if is_move {
+                        editor.sidebar.as_ref().and_then(|s| s.hover) != hover_before
+                    } else {
+                        true
+                    };
                 }
                 InputEvent::Resize(cols, rows) => {
                     // The size first: `resize` asks the backend for it while clearing,
