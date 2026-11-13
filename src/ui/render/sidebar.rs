@@ -14,7 +14,7 @@ use ratatui::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use crate::sidebar::{GitFile, Sidebar, SidebarTab};
+use crate::sidebar::{Area, GitFile, Sidebar, SidebarHit, SidebarTab};
 use crate::state::EditorState;
 
 const ACCENT: Color = Color::Rgb(97, 175, 239);
@@ -24,7 +24,9 @@ const TEXT: Color = Color::Rgb(200, 204, 212);
 const SELECTED_BG: Color = Color::Rgb(45, 50, 60);
 const SELECTED_BG_IDLE: Color = Color::Rgb(32, 34, 38);
 
-pub fn render_sidebar(editor: &EditorState, f: &mut Frame, area: Rect) {
+/// Draws the panel and records where it landed in `editor.ui_hit`, so a click can be
+/// answered without re-deriving the layout (see `SidebarHit` / `UiHit`).
+pub fn render_sidebar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
     let Some(sidebar) = editor.sidebar.as_ref() else {
         return;
     };
@@ -54,16 +56,32 @@ pub fn render_sidebar(editor: &EditorState, f: &mut Frame, area: Rect) {
         height: inner.height.saturating_sub(2),
     };
 
-    render_header(sidebar, f, header);
-    render_body(sidebar, f, body);
+    // Tab spans come back with the draw: the header knows where it put each word, so a
+    // click does not have to measure text again.
+    let tabs = render_header(sidebar, f, header);
+    let rows = render_body(sidebar, f, body);
+
+    // The borrow of `sidebar` ends here; record the geometry for the mouse handler.
+    editor.ui_hit.sidebar = Area::new(area.x, area.y, area.width, area.height);
+    // The right border column is the resize handle (the block draws it inside `area`).
+    editor.ui_hit.divider = Some(area.x + area.width.saturating_sub(1));
+    editor.ui_hit.header = Area::new(header.x, header.y, header.width, header.height);
+    editor.ui_hit.tabs = tabs;
+    editor.ui_hit.body = Area::new(body.x, body.y, body.width, body.height);
+    editor.ui_hit.rows = rows;
 }
 
 /// `▸ Files   ▸ Git 3        ⑂ main` — two views, the change count, and the branch.
-fn render_header(sidebar: &Sidebar, f: &mut Frame, area: Rect) {
+///
+/// Returns the clickable span of each tab as `(tab, x_start, x_end)`.
+fn render_header(sidebar: &Sidebar, f: &mut Frame, area: Rect) -> Vec<(SidebarTab, u16, u16)> {
     let mut spans: Vec<Span> = Vec::new();
+    let mut hit: Vec<(SidebarTab, u16, u16)> = Vec::new();
+    let mut x = area.x;
     for (i, tab) in [SidebarTab::Files, SidebarTab::Git].into_iter().enumerate() {
         if i > 0 {
             spans.push(Span::raw("  "));
+            x += 2;
         }
         let style = if sidebar.tab == tab {
             Style::default()
@@ -72,14 +90,18 @@ fn render_header(sidebar: &Sidebar, f: &mut Frame, area: Rect) {
         } else {
             Style::default().fg(DIM)
         };
-        spans.push(Span::styled(format!("{} ", marker(tab)), style));
+        let lead = format!("{} ", marker(tab));
+        let start = x;
+        x += UnicodeWidthStr::width(lead.as_str()) as u16;
+        spans.push(Span::styled(lead, style));
         spans.push(Span::styled(tab.name(), style));
+        x += UnicodeWidthStr::width(tab.name()) as u16;
         if tab == SidebarTab::Git && sidebar.git.has_changes() {
-            spans.push(Span::styled(
-                format!(" {}", sidebar.git.count()),
-                Style::default().fg(ACCENT),
-            ));
+            let count = format!(" {}", sidebar.git.count());
+            x += UnicodeWidthStr::width(count.as_str()) as u16;
+            spans.push(Span::styled(count, Style::default().fg(ACCENT)));
         }
+        hit.push((tab, start, x));
     }
 
     if sidebar.tab == SidebarTab::Git
@@ -97,6 +119,7 @@ fn render_header(sidebar: &Sidebar, f: &mut Frame, area: Rect) {
     }
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
+    hit
 }
 
 fn marker(tab: SidebarTab) -> &'static str {
@@ -106,18 +129,20 @@ fn marker(tab: SidebarTab) -> &'static str {
     }
 }
 
-fn render_body(sidebar: &Sidebar, f: &mut Frame, area: Rect) {
+/// Draws the rows and returns what each one was, top to bottom.
+fn render_body(sidebar: &Sidebar, f: &mut Frame, area: Rect) -> Vec<SidebarHit> {
     if area.height == 0 {
-        return;
+        return Vec::new();
     }
-    let lines = match sidebar.tab {
+    let (lines, hits) = match sidebar.tab {
         SidebarTab::Files => explorer_lines(sidebar, area),
         SidebarTab::Git => git_lines(sidebar, area),
     };
     f.render_widget(Paragraph::new(lines), area);
+    hits
 }
 
-fn explorer_lines(sidebar: &Sidebar, area: Rect) -> Vec<Line<'static>> {
+fn explorer_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarHit>) {
     let tree = &sidebar.explorer;
     let width = area.width as usize;
     let height = area.height as usize;
@@ -133,6 +158,7 @@ fn explorer_lines(sidebar: &Sidebar, area: Rect) -> Vec<Line<'static>> {
     };
 
     let mut lines = Vec::with_capacity(height);
+    let mut hits = Vec::with_capacity(height);
     for &idx in visible.iter().skip(scroll).take(height) {
         let node = &tree.nodes[idx];
         let indent = "  ".repeat(node.depth);
@@ -163,6 +189,7 @@ fn explorer_lines(sidebar: &Sidebar, area: Rect) -> Vec<Line<'static>> {
             idx == tree.selected,
             sidebar.focused,
         ));
+        hits.push(SidebarHit::Row(idx));
     }
     if lines.is_empty() {
         lines.push(Line::from(Span::styled(
@@ -170,10 +197,10 @@ fn explorer_lines(sidebar: &Sidebar, area: Rect) -> Vec<Line<'static>> {
             Style::default().fg(DIM),
         )));
     }
-    lines
+    (lines, hits)
 }
 
-fn git_lines(sidebar: &Sidebar, area: Rect) -> Vec<Line<'static>> {
+fn git_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarHit>) {
     let git = &sidebar.git;
     let width = area.width as usize;
     let height = area.height as usize;
@@ -183,13 +210,19 @@ fn git_lines(sidebar: &Sidebar, area: Rect) -> Vec<Line<'static>> {
             Some(err) => format!("  {err}"),
             None => "  not a git repository".to_string(),
         };
-        return vec![Line::from(Span::styled(msg, Style::default().fg(DIM)))];
+        return (
+            vec![Line::from(Span::styled(msg, Style::default().fg(DIM)))],
+            Vec::new(),
+        );
     }
     if git.files.is_empty() {
-        return vec![Line::from(Span::styled(
-            "  Working tree clean",
-            Style::default().fg(DIM),
-        ))];
+        return (
+            vec![Line::from(Span::styled(
+                "  Working tree clean",
+                Style::default().fg(DIM),
+            ))],
+            Vec::new(),
+        );
     }
 
     let visible = git.visible();
@@ -201,6 +234,7 @@ fn git_lines(sidebar: &Sidebar, area: Rect) -> Vec<Line<'static>> {
     };
 
     let mut lines = Vec::with_capacity(height);
+    let mut hits = Vec::with_capacity(height);
     for &idx in visible.iter().skip(scroll).take(height) {
         let node = &git.nodes[idx];
         let indent = "  ".repeat(node.depth);
@@ -238,8 +272,9 @@ fn git_lines(sidebar: &Sidebar, area: Rect) -> Vec<Line<'static>> {
             idx == git.selected,
             sidebar.focused,
         ));
+        hits.push(SidebarHit::Row(idx));
     }
-    lines
+    (lines, hits)
 }
 
 /// Truncate to the panel width and paint the selection row edge to edge.

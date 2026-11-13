@@ -1,4 +1,4 @@
-use crate::action::Action;
+use crate::action::{Action, MouseButton};
 use crate::state::EditorState;
 use crate::state::key::{KeyCode, KeyModifiers};
 use crate::ui::Keymap;
@@ -52,11 +52,34 @@ pub fn map_event(editor: &EditorState, event: Event) -> InputEvent {
         Event::Resize(cols, rows) => InputEvent::Resize(cols, rows),
         Event::FocusLost => InputEvent::Flush,
         Event::Mouse(mouse) => match mouse.kind {
-            MouseEventKind::ScrollDown => InputEvent::Action(Action::Wheel(WHEEL_LINES)),
-            MouseEventKind::ScrollUp => InputEvent::Action(Action::Wheel(-WHEEL_LINES)),
+            // Wheel first: the position decides whether it scrolls the panel or the buffer.
+            MouseEventKind::ScrollDown => {
+                InputEvent::Action(Action::MouseScroll(WHEEL_LINES, mouse.column, mouse.row))
+            }
+            MouseEventKind::ScrollUp => {
+                InputEvent::Action(Action::MouseScroll(-WHEEL_LINES, mouse.column, mouse.row))
+            }
+            MouseEventKind::Down(button) => InputEvent::Action(Action::MouseDown(
+                mouse_button(button),
+                mouse.column,
+                mouse.row,
+            )),
+            MouseEventKind::Drag(crossterm::event::MouseButton::Left) | MouseEventKind::Moved => {
+                InputEvent::Action(Action::MouseDrag(mouse.column, mouse.row))
+            }
+            MouseEventKind::Up(_) => InputEvent::Action(Action::MouseUp),
             _ => InputEvent::Ignore,
         },
         _ => InputEvent::Ignore,
+    }
+}
+
+fn mouse_button(button: crossterm::event::MouseButton) -> MouseButton {
+    use crossterm::event::MouseButton as CT;
+    match button {
+        CT::Left => MouseButton::Left,
+        CT::Middle => MouseButton::Middle,
+        CT::Right => MouseButton::Right,
     }
 }
 
@@ -105,6 +128,7 @@ fn ct_mods(mods: crossterm::event::KeyModifiers) -> KeyModifiers {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action::MouseButton;
     use crate::state::EditorMode;
     use crossterm::event::{KeyCode as CtKeyCode, KeyEvent, KeyModifiers as CtKeyModifiers};
 
@@ -151,30 +175,38 @@ mod tests {
         })
     }
 
+    /// The wheel carries its position now: over the panel it walks the tree, elsewhere it
+    /// stays the scroll it always was (`reducer::sidebar::mouse_scroll` decides).
     #[test]
-    fn a_wheel_report_maps_to_one_row() {
+    fn a_wheel_report_carries_its_cell() {
         use crossterm::event::MouseEventKind as K;
         let editor = EditorState::new(None);
         assert!(matches!(
             map_event(&editor, mouse(K::ScrollDown)),
-            InputEvent::Action(Action::Wheel(1))
+            InputEvent::Action(Action::MouseScroll(1, 10, 5))
         ));
         assert!(matches!(
             map_event(&editor, mouse(K::ScrollUp)),
-            InputEvent::Action(Action::Wheel(-1))
+            InputEvent::Action(Action::MouseScroll(-1, 10, 5))
         ));
     }
 
-    /// 1000 番は押下も報告する —— クリックで何かが起きてはいけない。
+    /// A press is reported with the cell it landed on — the panel is mouse-first now.
     #[test]
-    fn a_click_is_ignored() {
-        use crossterm::event::{MouseButton, MouseEventKind as K};
+    fn a_left_click_is_reported_with_its_cell() {
+        use crossterm::event::{MouseButton as CtButton, MouseEventKind as K};
         let editor = EditorState::new(None);
-        for kind in [K::Down(MouseButton::Left), K::Up(MouseButton::Left)] {
-            assert!(matches!(
-                map_event(&editor, mouse(kind)),
-                InputEvent::Ignore
-            ));
-        }
+        assert!(matches!(
+            map_event(&editor, mouse(K::Down(CtButton::Left))),
+            InputEvent::Action(Action::MouseDown(MouseButton::Left, 10, 5))
+        ));
+        assert!(matches!(
+            map_event(&editor, mouse(K::Up(CtButton::Left))),
+            InputEvent::Action(Action::MouseUp)
+        ));
+        assert!(matches!(
+            map_event(&editor, mouse(K::Drag(CtButton::Left))),
+            InputEvent::Action(Action::MouseDrag(10, 5))
+        ));
     }
 }

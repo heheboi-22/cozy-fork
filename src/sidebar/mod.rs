@@ -24,6 +24,94 @@ pub const MAX_WIDTH: u16 = 60;
 /// Total terminal width below which the sidebar steps aside entirely.
 pub const MIN_TOTAL_WIDTH: u16 = 70;
 
+/// A screen rectangle in cells. Plain numbers on purpose: the state layer stays free of
+/// ratatui types, and a click can be resolved without asking the renderer again.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Area {
+    pub x: u16,
+    pub y: u16,
+    pub w: u16,
+    pub h: u16,
+}
+
+impl Area {
+    pub fn new(x: u16, y: u16, w: u16, h: u16) -> Self {
+        Self { x, y, w, h }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.w == 0 || self.h == 0
+    }
+
+    /// First column past the right edge.
+    pub fn right(&self) -> u16 {
+        self.x.saturating_add(self.w)
+    }
+
+    /// First row past the bottom edge.
+    pub fn bottom(&self) -> u16 {
+        self.y.saturating_add(self.h)
+    }
+
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        !self.is_empty()
+            && col >= self.x
+            && col < self.right()
+            && row >= self.y
+            && row < self.bottom()
+    }
+}
+
+/// What a click on a panel body row means: a node of whichever tree is showing.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SidebarHit {
+    Row(usize),
+}
+
+/// The screen as the last frame drew it — the map a mouse click is resolved against.
+///
+/// ⭐ This is the same idea as `desktop-cli`'s `Hit` in WA-Bot: the renderer records the
+/// rectangles it just drew, and the mouse handler answers questions about them without
+/// re-deriving the layout (which would drift the moment a row wraps or a folder opens).
+#[derive(Debug, Clone, Default)]
+pub struct UiHit {
+    /// The whole frame, for clamping a drag-resize.
+    pub screen: Area,
+    /// The panel including its right border. Empty when it was not drawn.
+    pub sidebar: Area,
+    /// The column of the panel's right border — the resize handle.
+    pub divider: Option<u16>,
+    /// The header row and the clickable spans in it: `(tab, x_start, x_end)`.
+    pub header: Area,
+    pub tabs: Vec<(SidebarTab, u16, u16)>,
+    /// The tree rows, top to bottom; index 0 sits at `body.y`.
+    pub body: Area,
+    pub rows: Vec<SidebarHit>,
+    /// The text area and where the text itself starts inside it (past the gutter).
+    pub text_area: Area,
+    pub text_x: u16,
+    pub text_width: u16,
+}
+
+impl UiHit {
+    pub fn row_at(&self, col: u16, row: u16) -> Option<SidebarHit> {
+        if !self.body.contains(col, row) {
+            return None;
+        }
+        self.rows.get((row - self.body.y) as usize).copied()
+    }
+
+    pub fn tab_at(&self, col: u16, row: u16) -> Option<SidebarTab> {
+        if !self.header.contains(col, row) {
+            return None;
+        }
+        self.tabs
+            .iter()
+            .find(|(_, start, end)| col >= *start && col < *end)
+            .map(|(tab, _, _)| *tab)
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SidebarTab {
     Files,
@@ -480,6 +568,50 @@ mod tests {
         };
         changes.absorb(text, Path::new(prefix));
         changes
+    }
+
+    #[test]
+    fn a_rect_answers_its_own_edges() {
+        let r = Area::new(10, 4, 5, 3);
+        assert!(r.contains(10, 4), "left/top corner is inside");
+        assert!(r.contains(14, 6), "right/bottom corner is inside");
+        assert!(!r.contains(15, 6), "right edge is exclusive");
+        assert!(!r.contains(14, 7), "bottom edge is exclusive");
+        assert!(
+            !Area::default().contains(0, 0),
+            "an empty rect holds nothing"
+        );
+    }
+
+    fn ui_hit() -> UiHit {
+        UiHit {
+            screen: Area::new(0, 0, 100, 30),
+            sidebar: Area::new(0, 0, 34, 24),
+            divider: Some(33),
+            header: Area::new(1, 0, 32, 1),
+            tabs: vec![(SidebarTab::Files, 1, 8), (SidebarTab::Git, 10, 19)],
+            body: Area::new(1, 2, 32, 22),
+            rows: vec![SidebarHit::Row(0), SidebarHit::Row(3), SidebarHit::Row(7)],
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn a_click_on_a_body_row_resolves_to_its_node() {
+        let hit = ui_hit();
+        assert_eq!(hit.row_at(5, 2), Some(SidebarHit::Row(0)));
+        assert_eq!(hit.row_at(5, 4), Some(SidebarHit::Row(7)));
+        assert_eq!(hit.row_at(5, 5), None, "past the drawn rows");
+        assert_eq!(hit.row_at(40, 2), None, "outside the panel");
+    }
+
+    #[test]
+    fn a_click_on_the_header_resolves_to_its_tab() {
+        let hit = ui_hit();
+        assert_eq!(hit.tab_at(3, 0), Some(SidebarTab::Files));
+        assert_eq!(hit.tab_at(14, 0), Some(SidebarTab::Git));
+        assert_eq!(hit.tab_at(9, 0), None, "the gap between tabs is not a tab");
+        assert_eq!(hit.tab_at(3, 1), None, "row 1 is not the header");
     }
 
     #[test]

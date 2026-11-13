@@ -91,6 +91,18 @@ Ctrl+S Save   Ctrl+B Browse ...  │
 - `j`/`k` or ↑/↓ move, `Enter`/`l` open a file (or expand a folder), `h` collapse,
   `Tab` switches tabs, `r` re-reads `git status`, `Esc` hands the keyboard back
 
+The panel is **mouse-first**:
+
+- click a row — a folder opens or closes, a file opens
+- click a tab in the header — switches views (clicking the open tab never closes it)
+- wheel over the panel — walks the tree
+- drag the panel's right border — resizes it (never past half the screen)
+- click in the text — the cursor goes where the character was drawn (soft wrap included)
+
+⚠️ While the panel is up the terminal hands the mouse to cozy, so the terminal's own
+drag-to-select needs **Shift**. Hiding the panel (`Alt+B` twice) gives plain drag-select
+back; the reading views and `czv` never take the mouse.
+
 Type badges take the place of an icon font: two coloured letters (`rs`, `md`, `ts`, …), so
 the tree reads the same in any terminal. Hidden entries are shown (`.vscode`, `.env`) but
 `.git` never is. The panel steps aside on terminals narrower than 70 columns, and

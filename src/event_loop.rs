@@ -16,6 +16,16 @@ use std::time::Duration;
 const WHEEL_ON: &[u8] = b"\x1b[?1007h";
 pub(crate) const WHEEL_OFF: &[u8] = b"\x1b[?1007l";
 
+/// Mouse reporting, taken only while the left panel is on screen: `1000` clicks,
+/// `1002` drags, `1006` coordinates as `ESC [ < … M`.
+///
+/// ⚠️ **This is the trade the panel makes.** While it is up, the terminal hands the mouse
+/// to cozy — so drag-to-select belongs to the terminal again only with Shift held. Hiding
+/// the panel (`Alt+B` twice) gives plain drag-select back, and the pager (`czv`) and the
+/// reading views never ask for it at all.
+const MOUSE_ON: &[u8] = b"\x1b[?1000h\x1b[?1002h\x1b[?1006h";
+pub(crate) const MOUSE_OFF: &[u8] = b"\x1b[?1006l\x1b[?1002l\x1b[?1000l";
+
 /// How long the loop waits for a key. Normally a second (the idle swap write and
 /// the cursor blink run on it); while Browse is still indexing in the background,
 /// a fifth of one, so the `indexing N` count and the newly found entries show up
@@ -82,12 +92,23 @@ pub fn run<W: Write>(
     report_wheel: bool,
 ) -> io::Result<()> {
     let mut wheel_on = false;
-    let result = run_loop(terminal, editor, event_src, report_wheel, &mut wheel_on);
+    let mut mouse_on = false;
+    let result = run_loop(
+        terminal,
+        editor,
+        event_src,
+        report_wheel,
+        &mut wheel_on,
+        &mut mouse_on,
+    );
+    let backend = terminal.backend_mut();
     if wheel_on {
-        let backend = terminal.backend_mut();
         let _ = backend.write_all(WHEEL_OFF);
-        let _ = Write::flush(backend);
     }
+    if mouse_on {
+        let _ = backend.write_all(MOUSE_OFF);
+    }
+    let _ = Write::flush(backend);
     result
 }
 
@@ -97,6 +118,7 @@ fn run_loop<W: Write>(
     event_src: &mut dyn EventSource,
     report_wheel: bool,
     wheel_on: &mut bool,
+    mouse_on: &mut bool,
 ) -> io::Result<()> {
     let mut needs_redraw = true;
     let mut seen_fetches = fetch_generation();
@@ -108,8 +130,22 @@ fn run_loop<W: Write>(
             Write::flush(backend)?;
             *wheel_on = want;
         }
+        // Clicks belong to the panel while the panel is up; nothing else asks for them.
+        let want_mouse = report_wheel && editor.sidebar_on_screen();
+        if want_mouse != *mouse_on {
+            let backend = terminal.backend_mut();
+            backend.write_all(if want_mouse { MOUSE_ON } else { MOUSE_OFF })?;
+            Write::flush(backend)?;
+            *mouse_on = want_mouse;
+        }
         if needs_redraw {
             terminal.draw(|f| {
+                // Geometry for the mouse: rebuilt from scratch each frame, so a click can
+                // never be answered with last mode's rectangles.
+                editor.ui_hit = crate::sidebar::UiHit {
+                    screen: crate::sidebar::Area::from(f.area()),
+                    ..Default::default()
+                };
                 let chunks = Renderer::editor_layout(f.area(), editor);
                 Renderer::render_body(editor, f, chunks[0]);
                 Renderer::render_shortcuts(editor, f, chunks[1]);

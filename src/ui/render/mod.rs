@@ -84,10 +84,7 @@ impl Renderer {
         let Some(sidebar) = editor.sidebar.as_ref() else {
             return 0;
         };
-        if !sidebar.visible || area.width < crate::sidebar::MIN_TOTAL_WIDTH {
-            return 0;
-        }
-        if !mode_draws_sidebar(editor.mode) {
+        if !editor.sidebar_on_screen() || area.width < crate::sidebar::MIN_TOTAL_WIDTH {
             return 0;
         }
         sidebar.width_for(area.width)
@@ -134,23 +131,15 @@ impl Renderer {
     }
 
     /// The left panel. A zero-width area (see `editor_layout`) draws nothing.
-    pub fn render_sidebar(editor: &EditorState, f: &mut Frame, area: Rect) {
+    pub fn render_sidebar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
         sidebar::render_sidebar(editor, f, area);
     }
 }
 
-/// The surfaces that own the whole area — the sidebar would only steal columns from a
-/// pager, the help screen, or the tree Browser itself.
-fn mode_draws_sidebar(mode: EditorMode) -> bool {
-    !matches!(
-        mode,
-        EditorMode::Browse
-            | EditorMode::Help
-            | EditorMode::Markdown
-            | EditorMode::View
-            | EditorMode::DiffReview
-            | EditorMode::DiffCommitMsg
-    )
+impl From<Rect> for crate::sidebar::Area {
+    fn from(r: Rect) -> Self {
+        Self::new(r.x, r.y, r.width, r.height)
+    }
 }
 
 fn normal_shortcut_rows(is_narrow: bool, mode: EditorMode) -> u16 {

@@ -255,6 +255,11 @@ pub struct EditorState {
     /// The left panel (explorer + source control). `None` for hosts that have no room
     /// for it (compact/mobile) and in unit tests, which opt in by building one.
     pub sidebar: Option<crate::sidebar::Sidebar>,
+    /// Where last frame's surfaces were drawn — the map mouse clicks are resolved against.
+    /// Rebuilt (and cleared) on every draw.
+    pub ui_hit: crate::sidebar::UiHit,
+    /// A drag on the panel's right border is in progress (the width follows the pointer).
+    pub sidebar_drag: bool,
 }
 
 pub(crate) struct EditorStateInit {
@@ -345,6 +350,23 @@ impl EditorState {
     /// (`COZY_COMPACT`) hides them by default to shrink the per-frame gutter.
     /// Single source of truth so the renderer and the toggle reducer agree
     /// (otherwise the first toggle on a compact host would be a no-op).
+    /// Whether the left panel is on screen right now: visible, built, and in a mode that
+    /// keeps the buffer (the full-screen surfaces — Browser, Help, preview, `czv`'s View —
+    /// own the whole area and draw no panel).
+    pub fn sidebar_on_screen(&self) -> bool {
+        let visible = self.sidebar.as_ref().is_some_and(|s| s.visible);
+        visible
+            && !matches!(
+                self.mode,
+                EditorMode::Browse
+                    | EditorMode::Help
+                    | EditorMode::Markdown
+                    | EditorMode::View
+                    | EditorMode::DiffReview
+                    | EditorMode::DiffCommitMsg
+            )
+    }
+
     pub(crate) fn line_numbers_visible(&self) -> bool {
         self.show_line_numbers_runtime.unwrap_or(
             self.config.show_line_numbers.unwrap_or(true) && !crate::runtime_env::compact(),
@@ -496,6 +518,8 @@ impl EditorState {
             recovery: None,
             create_dir: None,
             sidebar,
+            ui_hit: crate::sidebar::UiHit::default(),
+            sidebar_drag: false,
         }
         .with_recovery_offer()
         // ⭐ 設定の苦情も**画面へ**（`eprintln!` は TUI の絵を壊す・`#2`）。

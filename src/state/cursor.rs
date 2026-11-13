@@ -68,6 +68,15 @@ impl Cursor {
         self.goal_at = Some((self.x, self.y));
     }
 
+    /// Put the cursor at `(line, byte)` — a mouse click, not a motion. The goal column is
+    /// dropped, because the next `j`/`k` must start from where the click landed.
+    pub fn place(&mut self, line: usize, byte: usize) {
+        self.y = line;
+        self.x = byte;
+        self.goal = None;
+        self.goal_at = None;
+    }
+
     pub fn move_up(&mut self, lines: &[String]) {
         if self.y > 0 {
             self.sync_goal(visual_col(&lines[self.y], self.x));

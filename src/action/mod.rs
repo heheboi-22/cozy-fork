@@ -128,6 +128,22 @@ pub enum Action {
     SidebarCollapse, // h / ←: close a folder, or step to the parent
     SidebarNextTab,  // Tab: Files ↔ Git
     SidebarRefresh,  // r: re-read git status
+
+    // Mouse. Positions are screen cells; the reducer resolves them against
+    // `EditorState::ui_hit` (the rectangles the last frame drew).
+    MouseDown(MouseButton, u16, u16),
+    MouseDrag(u16, u16),
+    MouseUp,
+    MouseScroll(isize, u16, u16),
+}
+
+/// Which button a mouse action came from. cozy only acts on the left one today, but the
+/// variant is carried so a right-click menu does not need a second event type later.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseButton {
+    Left,
+    Middle,
+    Right,
 }
 
 /// `zz` / `zt` / `zb` —— 注目中のヒット行を画面のどこへ置くか（`#18`）。

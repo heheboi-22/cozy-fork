@@ -8,7 +8,7 @@ use ratatui::{
 
 use crate::state::{EditorMode, EditorState};
 use crate::utils::unicode::display_width_up_to;
-use crate::utils::wrap::{visual_row_count, wrap_chunks};
+use crate::utils::wrap::{byte_at_visual_col, visual_row_count, wrap_chunks};
 
 /// Clamp cursor position to stay within the terminal buffer bounds.
 fn clamp_cursor(frame_area: Rect, x: u16, y: u16) -> (u16, u16) {
@@ -41,6 +41,10 @@ pub fn render_text_buffer(editor: &mut EditorState, f: &mut Frame, area: Rect) {
 
     // Store text_display_width before adjust_scroll (which needs it for soft wrap)
     editor.text_display_width = text_width;
+    // Recorded for the mouse: a click is resolved against the frame that was drawn.
+    editor.ui_hit.text_area = crate::sidebar::Area::new(area.x, area.y, area.width, area.height);
+    editor.ui_hit.text_x = area.x + text_x_offset;
+    editor.ui_hit.text_width = text_width as u16;
     editor.adjust_scroll(viewport_height);
 
     // Refresh syntax highlight spans for the visible window (no-op unless the
@@ -396,6 +400,67 @@ mod render_color_tests {
 /// テストは全部緑のまま**だった（2026-08-28 に陰性対照で発覚）。
 /// ⭐ 幅と描画は**別々に壊れる**ので、**別々に固定する**必要がある ——
 /// 片方だけ直すと「画面と内部が別々に正しい」状態になり、それがまさに `#8` の症状。
+/// Where the cursor goes when the text is clicked at screen cell `(col, row)`.
+///
+/// Uses the same arithmetic as the frame that was just drawn — the gutter width, the
+/// soft-wrap chunks, the scroll offset — so a click lands on the character under the
+/// pointer instead of on a guess. `None` when the cell is not over the text area.
+///
+/// ⭐ The geometry comes from `editor.ui_hit` (recorded by [`render_text_buffer`]) rather
+/// than from the arguments, so this stays correct for a frame drawn with a sidebar and
+/// for one drawn without.
+pub fn click_to_cursor(editor: &EditorState, col: u16, row: u16) -> Option<(usize, usize)> {
+    let hit = &editor.ui_hit;
+    if !hit.text_area.contains(col, row) || hit.text_width == 0 {
+        return None;
+    }
+    let text_width = hit.text_width as usize;
+    let gutter = col < hit.text_x;
+    let vcol = (col.saturating_sub(hit.text_x) as usize).min(text_width.saturating_sub(1));
+    let target_row = (row - hit.text_area.y) as usize;
+    let soft_wrap = editor.soft_wrap && text_width > 0;
+    let line_count = editor.buffer.lines.len();
+
+    let mut visual = 0usize;
+    let mut buf_y = editor.scroll_offset;
+    while visual <= target_row {
+        if buf_y >= line_count {
+            // Past the last line: park at the end of the buffer rather than do nothing.
+            let last = line_count.saturating_sub(1);
+            return Some((last, editor.buffer.lines[last].len()));
+        }
+        let line = &editor.buffer.lines[buf_y];
+        if soft_wrap {
+            let chunks = wrap_chunks(line, text_width);
+            let last_chunk = chunks.len().saturating_sub(1);
+            for (i, &(cs, ce)) in chunks.iter().enumerate() {
+                if visual + i == target_row {
+                    if gutter {
+                        return Some((buf_y, cs));
+                    }
+                    return Some((
+                        buf_y,
+                        byte_at_visual_col(line, cs, ce, vcol, i == last_chunk),
+                    ));
+                }
+            }
+            visual += chunks.len();
+        } else {
+            if visual == target_row {
+                let byte = if gutter {
+                    0
+                } else {
+                    byte_at_visual_col(line, 0, line.len(), vcol, true)
+                };
+                return Some((buf_y, byte));
+            }
+            visual += 1;
+        }
+        buf_y += 1;
+    }
+    None
+}
+
 #[cfg(test)]
 mod control_char_rendering_tests {
     use super::*;
