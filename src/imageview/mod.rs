@@ -871,8 +871,15 @@ fn update(v: &mut Viewer, image_area: Rect) {
     if image_area.width == 0 || image_area.height == 0 {
         return;
     }
+    // How many pixels one cell can actually show. Kitty/Sixel/iTerm2 get the real cell
+    // size; halfblocks show two pixels per cell (upper and lower half), and resizing to
+    // the font's pixel rectangle first would be ~100× more work for nothing — that alone
+    // cost 1.3 s for a 6MP photo.
     let font = v.picker.font_size();
-    let (font_w, font_h) = ((font.width as u32).max(1), (font.height as u32).max(1));
+    let (font_w, font_h) = match v.picker.protocol_type() {
+        ProtocolType::Halfblocks => (1, 2),
+        _ => ((font.width as u32).max(1), (font.height as u32).max(1)),
+    };
     let max_px_w = image_area.width as u32 * font_w;
     let max_px_h = image_area.height as u32 * font_h;
     let (orig_w, orig_h) = v.image.dimensions();
@@ -922,7 +929,9 @@ fn update(v: &mut Viewer, image_area: Rect) {
     v.encode_ms = t0.elapsed().as_secs_f64() * 1000.0;
 }
 
-/// fast_image_resize（SIMD・Bilinear 固定）。PoC の実測: 1200×1920 → 枠内で 3.2ms。
+/// Resize to the pixels the window can actually show. Shrinking supersamples (4×4 per
+/// destination pixel), which is what keeps a 6MP photo at ~16 ms instead of the ~0.8 s a
+/// convolution kernel costs when the reduction is 35×.
 pub(super) fn resize_rgba(src: &DynamicImage, target_w: u32, target_h: u32) -> Vec<u8> {
     let (sw, sh) = src.dimensions();
     let src_rgba = src.to_rgba8();
@@ -932,12 +941,18 @@ pub(super) fn resize_rgba(src: &DynamicImage, target_w: u32, target_h: u32) -> V
     let src_ref =
         ImageRef::new(sw, sh, src_rgba.as_raw(), PixelType::U8x4).expect("source image ref");
     let mut dst = FirImage::new(target_w, target_h, PixelType::U8x4);
+    // ⭐ Shrinking: supersample instead of convolving. A convolution kernel runs over
+    // every *source* pixel, so fitting a 6MP photo into a 86×57 block cost 0.8–1.3 s —
+    // the "lemot" when opening a picture. `SuperSampling` visits each destination pixel
+    // and averages a 4×4 grid inside its box: 16 ms, same photo. Enlarging (zoom 1:1 of
+    // a tiny picture) is a handful of pixels, so it keeps the convolution's quality.
+    let alg = if target_w < sw || target_h < sh {
+        ResizeAlg::SuperSampling(FilterType::Bilinear, 4)
+    } else {
+        ResizeAlg::Convolution(FilterType::Bilinear)
+    };
     Resizer::new()
-        .resize(
-            &src_ref,
-            &mut dst,
-            &ResizeOptions::new().resize_alg(ResizeAlg::Convolution(FilterType::Bilinear)),
-        )
+        .resize(&src_ref, &mut dst, &ResizeOptions::new().resize_alg(alg))
         .expect("resize");
     dst.into_vec()
 }

@@ -190,6 +190,13 @@ name = "cozy"
 path = "src/lib.rs"
 
 # The profile that 'dist' will build with
+# Dependencies are compiled optimized even in a debug build. Without this, decoding a
+# picture (image, png, jpeg-decoder, fast_image_resize) and the tree-sitter grammars run
+# as unoptimized scalar code: opening a 6MP PNG took 3.4 s for the *first frame* because
+# the resize was unoptimized. Debug info for our own crate is unchanged.
+[profile.dev.package."*"]
+opt-level = 2
+
 [profile.dist]
 inherits = "release"
 lto = "thin"
