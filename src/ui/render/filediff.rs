@@ -96,17 +96,17 @@ pub fn render_file_diff(editor: &mut EditorState, f: &mut Frame, area: Rect) {
         height: area.height.saturating_sub(1),
     };
     let width = area.width as usize;
-    let lines: Vec<Line<'static>> = view
-        .rows
-        .iter()
-        .skip(scroll)
+    let lines: Vec<Line<'static>> = (scroll..view.rows.len())
         .take(height)
-        .map(|row| row_line(row, width))
+        .map(|i| {
+            let spans = view.spans.get(i).map(Vec::as_slice).unwrap_or(&[]);
+            row_line(&view.rows[i], width, spans)
+        })
         .collect();
     f.render_widget(Paragraph::new(lines), body);
 }
 
-fn row_line(row: &FileDiffRow, width: usize) -> Line<'static> {
+fn row_line(row: &FileDiffRow, width: usize, spans: &[(usize, usize, Style)]) -> Line<'static> {
     match row.kind {
         FileDiffKind::Hunk => Line::from(Span::styled(
             format!(" {}", row.text),
@@ -130,17 +130,63 @@ fn row_line(row: &FileDiffRow, width: usize) -> Line<'static> {
                 FileDiffKind::Del => ("-", DEL, Some(DEL_BG), DEL_GUTTER_BG),
                 _ => (" ", TEXT, None, GUTTER),
             };
-            let mut spans = vec![
+            let mut parts = vec![
                 Span::styled(format!("{old} {new} "), Style::default().fg(gutter_bg)),
                 Span::styled(sign.to_string(), Style::default().fg(color)),
-                Span::styled(format!(" {}", row.text), Style::default().fg(color)),
             ];
+            // ⭐ The code keeps its syntax colours here too, over the add/remove band.
+            // The band (and the sign) say *what* changed; the colours say *what it is* —
+            // one-colour code made a long hunk unreadable.
+            parts.extend(coloured_text(&row.text, spans));
             if let Some(bg) = bg {
-                spans = fill_row(spans, width, bg);
+                parts = fill_row(parts, width, bg);
             }
-            Line::from(spans)
+            Line::from(parts)
         }
     }
+}
+
+/// The row's code, split at the syntax spans. `spans` are byte ranges into `text`; the
+/// leading space the row draws after the sign is added here, so the offsets line up.
+fn coloured_text(text: &str, spans: &[(usize, usize, Style)]) -> Vec<Span<'static>> {
+    let drawn = format!(" {text}");
+    let mut out: Vec<Span<'static>> = Vec::new();
+    let mut pos = 0usize;
+    for (start, end, style) in spans {
+        // +1 for the space the sign is separated by.
+        let start = boundary(&drawn, start + 1);
+        let end = boundary(&drawn, end + 1);
+        if start > pos {
+            out.push(Span::styled(
+                drawn[pos..start].to_string(),
+                Style::default().fg(TEXT),
+            ));
+        }
+        if end > start && start >= pos {
+            out.push(Span::styled(drawn[start..end].to_string(), *style));
+            pos = end;
+        }
+    }
+    if pos < drawn.len() {
+        out.push(Span::styled(
+            drawn[pos..].to_string(),
+            Style::default().fg(TEXT),
+        ));
+    }
+    if out.is_empty() {
+        out.push(Span::styled(drawn, Style::default().fg(TEXT)));
+    }
+    out
+}
+
+/// Clamp a byte offset into `text` to a char boundary (tree-sitter offsets are already
+/// boundaries; this only guards the arithmetic).
+fn boundary(text: &str, i: usize) -> usize {
+    let mut i = i.min(text.len());
+    while i > 0 && !text.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }
 
 /// Paint the row edge to edge: a changed line reads as a band, not as a few coloured
@@ -185,7 +231,7 @@ mod tests {
 
     #[test]
     fn an_added_line_is_tinted_edge_to_edge() {
-        let line = row_line(&added(), 40);
+        let line = row_line(&added(), 40, &[]);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert_eq!(
             UnicodeWidthStr::width(text.as_str()),
@@ -212,7 +258,7 @@ mod tests {
             new: None,
             text: "gone".to_string(),
         };
-        let line = row_line(&row, 30);
+        let line = row_line(&row, 30, &[]);
         assert_eq!(line.spans[2].style.bg, Some(DEL_BG));
     }
 
@@ -224,7 +270,7 @@ mod tests {
             new: Some(1),
             text: "same".to_string(),
         };
-        let line = row_line(&row, 30);
+        let line = row_line(&row, 30, &[]);
         assert!(line.spans.iter().all(|s| s.style.bg.is_none()));
     }
 
@@ -273,6 +319,96 @@ mod tests {
             buffer[(0, 1)].bg != ADD_GUTTER_BG,
             "baris hunk tidak ikut diwarnai"
         );
+
+        // …and the syntax colours survive the band: `added` has no grammar here, so use a
+        // real one — `let` in Rust is magenta on top of the green.
+        let rows = vec![FileDiffRow {
+            kind: FileDiffKind::Add,
+            old: None,
+            new: Some(1),
+            text: "let x = 1;".to_string(),
+        }];
+        editor.file_diff = Some(FileDiffView::build(
+            std::path::Path::new("a.rs"),
+            false,
+            rows,
+        ));
+        terminal
+            .draw(|f| render_file_diff(&mut editor, f, f.area()))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let keyword = (0..60u16)
+            .map(|x| &buffer[(x, 1)])
+            .find(|c| c.symbol() == "l")
+            .expect("huruf pertama `let`");
+        assert_eq!(
+            keyword.fg,
+            Color::Magenta,
+            "kata kunci tetap magenta di layar"
+        );
+        assert_eq!(keyword.bg, ADD_BG, "dan latarnya band hijau");
+    }
+
+    /// ⭐ The diff keeps the file's syntax colours: the band says *what changed*, the
+    /// colours say *what it is*. Built through `FileDiffView::build`, so the language is
+    /// picked from the path exactly as the editor does it.
+    #[test]
+    fn a_changed_line_keeps_its_syntax_colours() {
+        let rows = vec![
+            FileDiffRow {
+                kind: FileDiffKind::Hunk,
+                old: None,
+                new: None,
+                text: "@@ -1,1 +1,2 @@".to_string(),
+            },
+            FileDiffRow {
+                kind: FileDiffKind::Add,
+                old: None,
+                new: Some(1),
+                text: "let x = 1;".to_string(),
+            },
+        ];
+        let view = crate::state::diff::FileDiffView::build(
+            std::path::Path::new("src/main.rs"),
+            false,
+            rows,
+        );
+        let spans = &view.spans[1];
+        assert!(
+            spans
+                .iter()
+                .any(|(_, _, style)| style.fg == Some(Color::Magenta)),
+            "kata kunci `let` harus magenta: {spans:?}"
+        );
+
+        let line = row_line(&view.rows[1], 60, spans);
+        let keyword = line
+            .spans
+            .iter()
+            .find(|s| s.content.as_ref().contains("let"))
+            .expect("span kata kunci");
+        assert_eq!(
+            keyword.style.fg,
+            Some(Color::Magenta),
+            "warna dipertahankan"
+        );
+        assert_eq!(keyword.style.bg, Some(ADD_BG), "tetap di atas band hijau");
+    }
+
+    /// A file with no grammar still paints its rows (just without syntax colours).
+    #[test]
+    fn a_plain_text_diff_still_has_its_band() {
+        let rows = vec![FileDiffRow {
+            kind: FileDiffKind::Add,
+            old: None,
+            new: Some(1),
+            text: "hello".to_string(),
+        }];
+        let view =
+            crate::state::diff::FileDiffView::build(std::path::Path::new("notes.xyz"), false, rows);
+        assert!(view.spans[0].is_empty(), "tidak ada grammar untuk .xyz");
+        let line = row_line(&view.rows[0], 40, &view.spans[0]);
+        assert_eq!(line.spans[1].style.bg, Some(ADD_BG));
     }
 
     #[test]
@@ -283,7 +419,7 @@ mod tests {
             new: Some(1),
             text: "x".repeat(200),
         };
-        let line = row_line(&row, 40);
+        let line = row_line(&row, 40, &[]);
         let text: String = line.spans.iter().map(|s| s.content.as_ref()).collect();
         assert!(
             UnicodeWidthStr::width(text.as_str()) >= 40,

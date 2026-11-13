@@ -376,6 +376,13 @@ pub struct FileDiffRow {
     pub text: String,
 }
 
+/// One row's syntax colours, as byte ranges into [`FileDiffRow::text`].
+///
+/// ⭐ Computed once when the diff opens, not per frame: a diff is a still picture, and the
+/// parse is the expensive part. It is plain data (`Style` is `Copy`), so the view keeps
+/// its `Clone`/`PartialEq` derives.
+pub type RowSpans = Vec<(usize, usize, ratatui::style::Style)>;
+
 /// An open single-file diff: what the Source Control row opens into.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FileDiffView {
@@ -385,6 +392,8 @@ pub struct FileDiffView {
     /// `true` when this is the index side (`git diff --cached`).
     pub staged: bool,
     pub rows: Vec<FileDiffRow>,
+    /// Syntax colours per row, same indices as `rows`.
+    pub spans: Vec<RowSpans>,
     pub scroll: usize,
     /// Set by the renderer — the reducer needs it to clamp scrolling.
     pub view_height: usize,
@@ -402,11 +411,13 @@ impl FileDiffView {
             .map(|(i, _)| i)
             .collect();
         let side = if staged { "staged" } else { "working tree" };
+        let spans = highlight_rows(rel, &rows);
         Self {
             title: format!("{}  ·  {side}", rel.display()),
             rel: rel.to_path_buf(),
             staged,
             rows,
+            spans,
             scroll: 0,
             view_height: 0,
             hunks,
@@ -421,6 +432,26 @@ impl FileDiffView {
     pub fn clamp_scroll(&mut self) {
         self.scroll = self.scroll.min(self.max_scroll());
     }
+}
+
+/// Syntax-colour every row, once, by parsing the whole diff as one document.
+///
+/// ⚠️ A hunk is a fragment of a file, so a parse of the fragments is approximate — the
+/// colours can differ from the editor's at a hunk boundary (an unclosed block is the usual
+/// case). That is what every diff viewer does with syntax highlighting, and it is still
+/// far more readable than a wall of one colour.
+fn highlight_rows(rel: &Path, rows: &[FileDiffRow]) -> Vec<RowSpans> {
+    // Row `i` must stay row `i`: the renderer indexes both with the same number.
+    let lines: Vec<String> = rows.iter().map(|row| row.text.clone()).collect();
+    if lines.is_empty() {
+        return Vec::new();
+    }
+    let mut highlighter = crate::utils::highlight::Highlighter::new();
+    highlighter.set_file(Some(rel));
+    highlighter.ensure(&lines, 0..lines.len());
+    (0..lines.len())
+        .map(|i| highlighter.line_spans(i).to_vec())
+        .collect()
 }
 
 /// Read one path's diff: `staged` picks the index side, and an untracked file has no diff

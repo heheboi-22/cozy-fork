@@ -185,6 +185,12 @@ impl Highlighter {
 
     /// Base style for the character at `byte` on line `y`, if highlighted.
     /// Later spans win (highlight precedence), so search from the end.
+    /// The spans computed for one line, in byte ranges. The diff view turns a whole file
+    /// into one document and reads each row's spans out of it (it never draws per byte).
+    pub(crate) fn line_spans(&self, y: usize) -> &[(usize, usize, Style)] {
+        self.cache.get(&y).map(Vec::as_slice).unwrap_or(&[])
+    }
+
     pub fn style_at(&self, y: usize, byte: usize) -> Option<Style> {
         self.cache.get(&y).and_then(|spans| {
             spans
