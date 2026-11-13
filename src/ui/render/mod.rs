@@ -139,27 +139,33 @@ impl Renderer {
     }
 
     pub fn render_status_bar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
-        footer::render_status_bar(editor, f, area);
         // ⭐ The one-pane layout needs a way back that a finger can hit: `‹ Files` at the
         // right end of the status row, where a narrow terminal leaves that zone empty.
+        // Its columns are reserved before the line is composed, so the message does not
+        // run underneath it.
         editor.ui_hit.pane_toggle = None;
-        if editor.shows_detail(area.width) {
-            let label = "‹ Files ";
-            let width = label.chars().count() as u16;
-            if area.width > width + 8 {
-                let rect = Rect {
-                    x: area.right() - width,
-                    y: area.y,
-                    width,
-                    height: 1,
-                };
-                f.render_widget(
-                    Paragraph::new(label)
-                        .style(Style::default().fg(Color::White).bg(Color::Rgb(45, 50, 60))),
-                    rect,
-                );
-                editor.ui_hit.pane_toggle = Some(crate::sidebar::Area::from(rect));
-            }
+        let label = "‹ Files ";
+        let width = label.chars().count() as u16;
+        // One blank column between the message and the chip.
+        let reserve = if editor.shows_detail(area.width) && area.width > width + 9 {
+            width + 1
+        } else {
+            0
+        };
+        footer::render_status_bar(editor, f, area, reserve);
+        if reserve > 0 {
+            let rect = Rect {
+                x: area.right() - width,
+                y: area.y,
+                width,
+                height: 1,
+            };
+            f.render_widget(
+                Paragraph::new(label)
+                    .style(Style::default().fg(Color::White).bg(Color::Rgb(45, 50, 60))),
+                rect,
+            );
+            editor.ui_hit.pane_toggle = Some(crate::sidebar::Area::from(rect));
         }
     }
 

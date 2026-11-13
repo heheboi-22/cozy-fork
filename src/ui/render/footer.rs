@@ -83,7 +83,13 @@ fn shortcut_bar_style(editor: &EditorState) -> Style {
     ))
 }
 
-pub fn render_status_bar(editor: &EditorState, f: &mut Frame, area: Rect) {
+pub fn render_status_bar(editor: &EditorState, f: &mut Frame, area: Rect, reserve: u16) {
+    // `reserve` columns at the right belong to someone else (the pane switch chip in the
+    // one-pane layout), so the composed line must not run under them.
+    let area = Rect {
+        width: area.width.saturating_sub(reserve),
+        ..area
+    };
     // A pending recovery owns the line: it is a question, and the user cannot
     // edit until they answer it. One line, two keys — vim's swap dialog is a
     // wall of text, and cozy's whole pitch is that you can type like nano.
@@ -1651,7 +1657,7 @@ mod tests {
         let backend = TestBackend::new(width, 1);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal
-            .draw(|f| render_status_bar(editor, f, Rect::new(0, 0, width, 1)))
+            .draw(|f| render_status_bar(editor, f, Rect::new(0, 0, width, 1), 0))
             .unwrap();
         let buffer = terminal.backend().buffer();
         (0..width)
