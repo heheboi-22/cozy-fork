@@ -155,19 +155,23 @@ impl Renderer {
     }
 
     pub fn render_status_bar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
-        // ⭐ The one-pane layout needs a way back that a finger can hit: `‹ Files` at the
-        // right end of the status row, where a narrow terminal leaves that zone empty.
-        // Its columns are reserved before the line is composed, so the message does not
-        // run underneath it.
+        // ⭐ The pane switch lives in the corner of the status row, and its columns are
+        // reserved before the line is composed so the message never runs underneath:
+        //   narrow, file on screen → `‹ Files` (back to the list)
+        //   wide, panel folded    → `» Files` (bring it back — 🚨 the panel used to be
+        //                            unreachable once `«` hid it, if the terminal did not
+        //                            deliver Alt+B)
         editor.ui_hit.pane_toggle = None;
-        let label = "‹ Files ";
-        let width = label.chars().count() as u16;
-        // One blank column between the message and the chip.
-        let reserve = if editor.shows_detail(area.width) && area.width > width + 9 {
-            width + 1
+        let label = if editor.sidebar_folded() {
+            "» Files "
         } else {
-            0
+            "‹ Files "
         };
+        let width = label.chars().count() as u16;
+        let show =
+            (editor.sidebar_folded() || editor.shows_detail(area.width)) && area.width > width + 9;
+        // One blank column between the message and the chip.
+        let reserve = if show { width + 1 } else { 0 };
         footer::render_status_bar(editor, f, area, reserve);
         if reserve > 0 {
             let rect = Rect {

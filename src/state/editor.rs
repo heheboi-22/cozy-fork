@@ -465,16 +465,31 @@ impl EditorState {
     /// own the whole area and draw no panel).
     pub fn sidebar_on_screen(&self) -> bool {
         let visible = self.sidebar.as_ref().is_some_and(|s| s.visible);
-        visible
-            && !matches!(
-                self.mode,
-                EditorMode::Browse
-                    | EditorMode::Help
-                    | EditorMode::Markdown
-                    | EditorMode::View
-                    | EditorMode::DiffReview
-                    | EditorMode::DiffCommitMsg
-            )
+        visible && self.panel_allowed()
+    }
+
+    /// Could the panel be on screen in this mode at all? The full-screen surfaces own the
+    /// whole area, so the panel is not "hidden" there — there is nowhere to put it.
+    pub fn panel_allowed(&self) -> bool {
+        !matches!(
+            self.mode,
+            EditorMode::Browse
+                | EditorMode::Help
+                | EditorMode::Markdown
+                | EditorMode::View
+                | EditorMode::DiffReview
+                | EditorMode::DiffCommitMsg
+        )
+    }
+
+    /// The panel was folded away by the user (`«`), not merely out of place because the
+    /// mode owns the screen. This is what puts a way back on the status row.
+    pub fn sidebar_folded(&self) -> bool {
+        self.panel_allowed()
+            && self
+                .sidebar
+                .as_ref()
+                .is_some_and(|sidebar| !sidebar.visible)
     }
 
     /// The terminal is too narrow for a panel beside the text, so the two take turns

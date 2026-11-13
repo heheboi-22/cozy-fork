@@ -260,11 +260,23 @@ pub fn mouse_down(
     {
         let narrow = editor.narrow_screen();
         let showing_list = editor.shows_list(hit.screen.w);
+        let tab = editor
+            .sidebar
+            .as_ref()
+            .map(|sidebar| sidebar.tab)
+            .unwrap_or(SidebarTab::Files);
         return if narrow && showing_list {
+            // `» Edit`: back to the file.
             unfocus(editor)
         } else if narrow {
+            // `‹ Files`: back to the list.
             show_list(editor)
+        } else if editor.sidebar_folded() {
+            // `» Files` on the status row: the panel was folded away and this is the way
+            // back (the same key works, but a terminal without Alt must have a button).
+            focus(editor, tab)
         } else {
+            // `«` in the panel's own corner.
             fold_panel(editor)
         };
     }
@@ -891,6 +903,60 @@ mod rendered_frame_tests {
         let chip = editor.ui_hit.pane_toggle.expect("» Edit di header list");
         let _ = mouse_down(&mut editor, MouseButton::Left, chip.x + 1, chip.y);
         assert!(!editor.sidebar.as_ref().unwrap().focused, "chip → berkas");
+    }
+
+    /// 🚨 The panel used to be unreachable once `«` folded it away on a wide terminal:
+    /// the only way back was Alt+B, which some terminals never deliver. The status row now
+    /// carries `» Files`, and a click brings the panel back.
+    #[test]
+    fn a_folded_panel_comes_back_from_the_status_row() {
+        let (_tmp, mut editor) = drawn(110, 20);
+        editor.sidebar.as_mut().unwrap().focused = true;
+        fold_panel(&mut editor);
+        assert!(!editor.sidebar.as_ref().unwrap().visible);
+        assert!(
+            editor.sidebar_folded(),
+            "status row harus menawarkan jalan balik"
+        );
+
+        let mut terminal = Terminal::new(TestBackend::new(110, 20)).unwrap();
+        let draw = |editor: &mut EditorState, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|f| {
+                    editor.ui_hit = UiHit {
+                        screen: crate::sidebar::Area::from(f.area()),
+                        ..Default::default()
+                    };
+                    let chunks = Renderer::editor_layout(f.area(), editor);
+                    Renderer::render_body(editor, f, chunks[0]);
+                    Renderer::render_shortcuts(editor, f, chunks[1]);
+                    Renderer::render_status_bar(editor, f, chunks[2]);
+                    Renderer::render_sidebar(editor, f, chunks[3]);
+                })
+                .unwrap();
+        };
+        draw(&mut editor, &mut terminal);
+        let chip = editor
+            .ui_hit
+            .pane_toggle
+            .expect("chip `» Files` di baris status");
+        let _ = mouse_down(&mut editor, MouseButton::Left, chip.x + 1, chip.y);
+        assert!(
+            editor.sidebar.as_ref().unwrap().visible,
+            "klik chip membuka panel lagi"
+        );
+        assert!(editor.sidebar.as_ref().unwrap().focused);
+        assert!(!editor.sidebar_folded(), "chip hilang setelah panel tampil");
+    }
+
+    /// No chip when there is nowhere to put the panel (a full-screen surface owns the
+    /// screen) — a button that does nothing is worse than no button.
+    #[test]
+    fn a_full_screen_mode_offers_no_panel_chip() {
+        let (_tmp, mut editor) = drawn(110, 20);
+        fold_panel(&mut editor);
+        editor.enter_mode(EditorMode::Markdown);
+        assert!(!editor.sidebar_folded(), "Markdown memakai seluruh layar");
     }
 
     /// A wide window keeps the old behaviour: the panel folds away, and the same key
