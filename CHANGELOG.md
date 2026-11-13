@@ -24,6 +24,7 @@
 - Mouse reporting (`1000`/`1002`/`1006`) is taken **only while the panel is on screen** and released when it is hidden — so while the panel is up the terminal's drag-to-select needs Shift, and hiding the panel gives plain drag-select back. The reading views and `czv` still take no mouse at all.
 - Saving with the Git tab on screen refreshes the change list, so a file's row goes from modified to clean without pressing `r`.
 - Command palette entries `View.SidebarFiles`, `View.SidebarGit`, `View.RefreshGit`, and the `[keys]` names `sidebar_files` / `sidebar_git`.
+- **One pane on a narrow screen: the list, then the file, then back.** Below 70 columns the panel used to vanish, which left a phone or a split terminal with no explorer at all. It now behaves like WA-Bot's small window: the **list owns the screen**, tapping a row opens that file as the **detail** (full width), `‹ Files` on the status row or `Esc` comes back, and `» Edit` in the list header returns to the file. `Alt+B`/`Alt+G` show the list and never hide it in this layout; on a wide terminal the same header corner shows `«` and folds the panel away (the shortcut brings it back). The narrow list draws no right border, since there is nothing beside it, and it keeps the scrollbar column. The branch label in the header is now measured in columns, not bytes — `≡`/`⑂` are three bytes each, which used to push `⑂ main` out of the panel.
 
 ### Fixed
 

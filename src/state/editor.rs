@@ -446,6 +446,45 @@ impl EditorState {
             )
     }
 
+    /// The terminal is too narrow for a panel beside the text, so the two take turns
+    /// (`Sidebar` list on screen, then the file, then the list again).
+    pub fn narrow_screen(&self) -> bool {
+        let width = self.ui_hit.screen.w;
+        width > 0 && width < crate::sidebar::MIN_TOTAL_WIDTH
+    }
+
+    /// Something worth calling the detail pane: a named file, or an unnamed buffer with
+    /// edits in it.
+    pub fn has_document(&self) -> bool {
+        self.filename.is_some() || self.modified
+    }
+
+    /// ⭐ The width decides the shape, exactly like WA-Bot's one-pane window:
+    ///
+    /// - wide: the panel and the text share the screen;
+    /// - narrow: one pane at a time. The **list** shows when the user asked for it or when
+    ///   there is nothing else to look at, otherwise the **file** does. Clicking a row
+    ///   opens that file, which walks the same rule from list to detail; `Esc` and the
+    ///   `‹ / »` chip walk back.
+    pub fn shows_list(&self, width: u16) -> bool {
+        width > 0
+            && width < crate::sidebar::MIN_TOTAL_WIDTH
+            && self.sidebar_on_screen()
+            && self
+                .sidebar
+                .as_ref()
+                .is_some_and(|sidebar| sidebar.focused || !self.has_document())
+    }
+
+    /// The narrow layout is showing the file, with the list one step away. (False when
+    /// the terminal is wide: there the panel is beside the text, not behind it.)
+    pub fn shows_detail(&self, width: u16) -> bool {
+        width > 0
+            && width < crate::sidebar::MIN_TOTAL_WIDTH
+            && self.sidebar_on_screen()
+            && !self.shows_list(width)
+    }
+
     pub(crate) fn line_numbers_visible(&self) -> bool {
         self.show_line_numbers_runtime.unwrap_or(
             self.config.show_line_numbers.unwrap_or(true) && !crate::runtime_env::compact(),

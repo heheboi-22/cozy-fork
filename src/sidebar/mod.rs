@@ -103,6 +103,9 @@ pub struct UiHit {
     pub sidebar_vbar: Option<Area>,
     pub editor_vbar: Option<Area>,
     pub editor_hbar: Option<Area>,
+    /// The pane switch drawn last frame: `«` in the panel's header (wide terminals) or
+    /// `‹ / »` in the status bar (narrow ones, where the two panes take turns).
+    pub pane_toggle: Option<Area>,
     pub text_x: u16,
     pub text_width: u16,
 }

@@ -767,6 +767,13 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
             // **3 種類の利用者に効かせるため**（デスクトップ・モバイル・エージェント）。
             // ⭐ 失う物が無い面なので、出口は軽いほどよい（`#14`）。
             crate::state::EditorMode::View => EventResult::Exit,
+            // ⭐ One-pane layout: `Esc` in the text is "back to the list" — the same key
+            // that leaves every other surface goes back one step here too.
+            crate::state::EditorMode::Edit | crate::state::EditorMode::Glide
+                if editor.shows_detail(editor.ui_hit.screen.w) =>
+            {
+                sidebar::show_list(editor)
+            }
             _ => editor::apply_editor_event(editor, &action),
         },
         Action::BrowseExpandOrOpen => browse::expand_or_open(editor),

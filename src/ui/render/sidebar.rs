@@ -40,6 +40,7 @@ const HOVER_TO_RGB: (u8, u8, u8) = (46, 51, 61);
 /// Draws the panel and records where it landed in `editor.ui_hit`, so a click can be
 /// answered without re-deriving the layout (see `SidebarHit` / `UiHit`).
 pub fn render_sidebar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
+    let has_document = editor.has_document();
     let Some(sidebar) = editor.sidebar.as_mut() else {
         return;
     };
@@ -47,8 +48,15 @@ pub fn render_sidebar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
         return;
     }
 
+    let narrow = f.area().width < crate::sidebar::MIN_TOTAL_WIDTH;
+    // On a narrow screen the panel *is* the screen: a right border would be a line drawn
+    // against nothing, and it would eat the column the scrollbar needs.
     let block = Block::default()
-        .borders(Borders::RIGHT)
+        .borders(if narrow {
+            Borders::NONE
+        } else {
+            Borders::RIGHT
+        })
         .border_style(Style::default().fg(Color::Rgb(60, 62, 68)));
     let inner = block.inner(area);
     f.render_widget(block, area);
@@ -91,15 +99,21 @@ pub fn render_sidebar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
         body
     };
 
+    // ⭐ In a narrow terminal the panel *is* the screen, so the header carries the way
+    // back to the file instead of a collapse arrow — the same button, two meanings, like
+    // WA-Bot's `‹`.
+
     // Tab spans come back with the draw: the header knows where it put each word, so a
     // click does not have to measure text again.
-    let tabs = render_header(sidebar, f, header);
+    let (tabs, toggle) = render_header(sidebar, f, header, narrow, has_document);
     let rows = render_body(sidebar, f, body);
 
     // The borrow of `sidebar` ends here; record the geometry for the mouse handler.
     editor.ui_hit.sidebar = Area::new(area.x, area.y, area.width, area.height);
-    // The right border column is the resize handle (the block draws it inside `area`).
-    editor.ui_hit.divider = Some(area.x + area.width.saturating_sub(1));
+    // The right border column is the resize handle (the block draws it inside `area`) —
+    // but only when there is something on the other side of it to resize against.
+    editor.ui_hit.divider = (!narrow).then(|| area.x + area.width.saturating_sub(1));
+    editor.ui_hit.pane_toggle = toggle.map(Area::from);
     editor.ui_hit.header = Area::new(header.x, header.y, header.width, header.height);
     editor.ui_hit.tabs = tabs;
     editor.ui_hit.body = Area::new(body.x, body.y, body.width, body.height);
@@ -127,7 +141,30 @@ pub fn render_sidebar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
 /// `≡ Files   ⑂ Git 3        ⑂ main` — two views, the change count, and the branch.
 ///
 /// Returns the clickable span of each tab as `(tab, x_start, x_end)`.
-fn render_header(sidebar: &Sidebar, f: &mut Frame, area: Rect) -> Vec<(SidebarTab, u16, u16)> {
+fn render_header(
+    sidebar: &Sidebar,
+    f: &mut Frame,
+    area: Rect,
+    narrow: bool,
+    has_document: bool,
+) -> (Vec<(SidebarTab, u16, u16)>, Option<Rect>) {
+    // `«` folds the panel away on a wide screen; on a narrow one there is nothing to
+    // fold, so the same corner says `» Edit` and goes back to the file.
+    let toggle = if narrow {
+        has_document.then_some("» Edit ")
+    } else {
+        Some("« ")
+    };
+    let toggle_w = toggle.map_or(0, |label| UnicodeWidthStr::width(label) as u16);
+    let fits = area.width >= toggle_w + 12;
+    let right_edge = area.right();
+    // The tabs and the branch label stop short of the chip; the chip itself is drawn
+    // against the panel's real edge.
+    let area = Rect {
+        width: area.width.saturating_sub(if fits { toggle_w } else { 0 }),
+        ..area
+    };
+
     let mut spans: Vec<Span> = Vec::new();
     let mut hit: Vec<(SidebarTab, u16, u16)> = Vec::new();
     let mut x = area.x;
@@ -160,19 +197,44 @@ fn render_header(sidebar: &Sidebar, f: &mut Frame, area: Rect) -> Vec<(SidebarTa
     if sidebar.tab == SidebarTab::Git
         && let Some(branch) = header_branch(sidebar)
     {
-        let used: usize = spans.iter().map(|s| s.content.len()).sum();
-        let room = (area.width as usize).saturating_sub(used + 4);
+        // Columns, not bytes: `≡` and `⑂` are three bytes each, and counting them as
+        // three columns pushed the branch label out of a 34-column panel.
+        let used: usize = spans
+            .iter()
+            .map(|s| UnicodeWidthStr::width(s.content.as_ref()))
+            .sum();
+        // One blank column between the label and the corner chip.
+        let room = (area.width as usize).saturating_sub(used + 5);
         if room >= 6 {
             let label: String = format!("⑂ {branch}").chars().take(room).collect();
-            spans.push(Span::raw(
-                " ".repeat((area.width as usize).saturating_sub(used + label.len())),
-            ));
+            let pad = (area.width as usize)
+                .saturating_sub(used + UnicodeWidthStr::width(label.as_str()) + 1);
+            spans.push(Span::raw(" ".repeat(pad)));
             spans.push(Span::styled(label, Style::default().fg(DIM)));
         }
     }
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
-    hit
+
+    let toggle = (fits && toggle.is_some()).then(|| {
+        let label = toggle.unwrap_or_default();
+        let rect = Rect {
+            x: right_edge.saturating_sub(toggle_w),
+            y: area.y,
+            width: toggle_w,
+            height: 1,
+        };
+        f.render_widget(
+            Paragraph::new(label).style(
+                Style::default()
+                    .fg(Color::Rgb(200, 204, 212))
+                    .bg(Color::Rgb(45, 50, 60)),
+            ),
+            rect,
+        );
+        rect
+    });
+    (hit, toggle)
 }
 
 /// What the header says about the repository. One repository: its branch (the useful

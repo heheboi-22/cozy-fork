@@ -11,6 +11,8 @@ pub mod sidebar;
 use ratatui::{
     Frame,
     layout::{Constraint, Direction, Layout, Rect},
+    style::{Color, Style},
+    widgets::Paragraph,
 };
 use std::rc::Rc;
 
@@ -57,23 +59,27 @@ impl Renderer {
         // footer and status bar — VS Code's shape. It steps aside when the terminal is
         // too narrow to keep a useful editing column beside it, and never appears over
         // the full-screen surfaces (Browse/Help/preview) that own the whole area.
+        // ⭐ One pane or two? Wide terminals put the panel beside the text; narrow ones
+        // (phones, split terminals) give each the whole band in turn — WA-Bot's
+        // list/detail shape: the list on screen, tap a row, the file takes the screen,
+        // `‹` or Esc comes back.
         let sidebar_w = Self::sidebar_width(editor, area);
-        let (body, panel) = if sidebar_w > 0 {
+        let blank = Rect {
+            x: rows[0].x,
+            y: rows[0].y,
+            width: 0,
+            height: 0,
+        };
+        let (body, panel) = if editor.shows_list(area.width) {
+            (blank, rows[0])
+        } else if sidebar_w > 0 {
             let cols = Layout::default()
                 .direction(Direction::Horizontal)
                 .constraints([Constraint::Length(sidebar_w), Constraint::Min(1)])
                 .split(rows[0]);
             (cols[1], cols[0])
         } else {
-            (
-                rows[0],
-                Rect {
-                    x: rows[0].x,
-                    y: rows[0].y,
-                    width: 0,
-                    height: 0,
-                },
-            )
+            (rows[0], blank)
         };
 
         // 📌 並びは `[body, shortcuts, status, sidebar]` —— 既存の呼び手（テストを含む）は
@@ -132,8 +138,29 @@ impl Renderer {
         footer::render_shortcuts(editor, f, area);
     }
 
-    pub fn render_status_bar(editor: &EditorState, f: &mut Frame, area: Rect) {
+    pub fn render_status_bar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
         footer::render_status_bar(editor, f, area);
+        // ⭐ The one-pane layout needs a way back that a finger can hit: `‹ Files` at the
+        // right end of the status row, where a narrow terminal leaves that zone empty.
+        editor.ui_hit.pane_toggle = None;
+        if editor.shows_detail(area.width) {
+            let label = "‹ Files ";
+            let width = label.chars().count() as u16;
+            if area.width > width + 8 {
+                let rect = Rect {
+                    x: area.right() - width,
+                    y: area.y,
+                    width,
+                    height: 1,
+                };
+                f.render_widget(
+                    Paragraph::new(label)
+                        .style(Style::default().fg(Color::White).bg(Color::Rgb(45, 50, 60))),
+                    rect,
+                );
+                editor.ui_hit.pane_toggle = Some(crate::sidebar::Area::from(rect));
+            }
+        }
     }
 
     /// The left panel. A zero-width area (see `editor_layout`) draws nothing.

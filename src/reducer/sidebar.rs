@@ -17,10 +17,14 @@ pub fn focus(editor: &mut EditorState, tab: SidebarTab) -> EventResult {
     if editor.sidebar.is_none() {
         editor.sidebar = Some(Sidebar::new(&editor._working_dir));
     }
+    // ⭐ On a narrow screen there is nothing to hide: the panel and the text take turns,
+    // so this key means "show the list" and never folds it away — the same button that
+    // collapses the panel on a wide screen goes back to the list here.
+    let narrow = editor.narrow_screen();
     let Some(sidebar) = editor.sidebar.as_mut() else {
         return EventResult::Continue;
     };
-    if sidebar.focused && sidebar.tab == tab {
+    if !narrow && sidebar.focused && sidebar.tab == tab {
         sidebar.focused = false;
         sidebar.visible = false;
         editor.set_status_message("Sidebar: hidden".to_string(), StatusKind::Info, false);
@@ -49,6 +53,32 @@ pub fn unfocus(editor: &mut EditorState) -> EventResult {
         sidebar.focused = false;
     }
     editor.status_message = None;
+    EventResult::Continue
+}
+
+/// Put the list on screen and give it the keyboard. On a wide terminal this is just a
+/// focus move; on a narrow one it is the "back" of the one-pane layout.
+pub fn show_list(editor: &mut EditorState) -> EventResult {
+    if let Some(sidebar) = editor.sidebar.as_mut() {
+        sidebar.visible = true;
+        sidebar.focused = true;
+    }
+    editor.status_message = None;
+    EventResult::Continue
+}
+
+/// Hide the panel on a wide terminal; on a narrow one, hand the screen back to the file
+/// (the list stays one key away).
+pub fn fold_panel(editor: &mut EditorState) -> EventResult {
+    let narrow = editor.narrow_screen();
+    let Some(sidebar) = editor.sidebar.as_mut() else {
+        return EventResult::Continue;
+    };
+    sidebar.focused = false;
+    if !narrow {
+        sidebar.visible = false;
+        editor.set_status_message("Sidebar: hidden".to_string(), StatusKind::Info, false);
+    }
     EventResult::Continue
 }
 
@@ -219,6 +249,22 @@ pub fn mouse_down(
         return EventResult::Continue;
     }
     let hit = editor.ui_hit.clone();
+
+    // 0. The pane switch (`«` in the panel's header, `‹ / »` in the status bar): folding
+    //    the panel away, or — on a narrow screen — walking between the list and the file.
+    if let Some(rect) = hit.pane_toggle
+        && rect.contains(col, row)
+    {
+        let narrow = editor.narrow_screen();
+        let showing_list = editor.shows_list(hit.screen.w);
+        return if narrow && showing_list {
+            unfocus(editor)
+        } else if narrow {
+            show_list(editor)
+        } else {
+            fold_panel(editor)
+        };
+    }
 
     // 1. The divider: grabbing it starts a resize that follows the pointer until release.
     if let Some(divider) = hit.divider
@@ -715,11 +761,14 @@ mod tests {
 
 #[cfg(test)]
 mod rendered_frame_tests {
+    use super::{focus, fold_panel, mouse_down, unfocus};
+    use crate::action::MouseButton;
     use crate::sidebar::{SidebarTab, UiHit};
     use crate::state::{EditorMode, EditorState};
     use crate::ui::Renderer;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
+    use ratatui::layout::Rect;
     use std::fs;
 
     /// Draw one real frame and hand back the editor with its recorded geometry.
@@ -746,11 +795,130 @@ mod rendered_frame_tests {
                 let chunks = Renderer::editor_layout(f.area(), &editor);
                 Renderer::render_body(&mut editor, f, chunks[0]);
                 Renderer::render_shortcuts(&editor, f, chunks[1]);
-                Renderer::render_status_bar(&editor, f, chunks[2]);
+                Renderer::render_status_bar(&mut editor, f, chunks[2]);
                 Renderer::render_sidebar(&mut editor, f, chunks[3]);
             })
             .unwrap();
         (tmp, editor)
+    }
+
+    // ── one pane on a narrow screen (WA-Bot's list/detail shape) ────────────────
+
+    /// Below `MIN_TOTAL_WIDTH` the panel and the text take turns instead of sharing.
+    /// With nothing open, the list owns the screen.
+    #[test]
+    fn a_narrow_window_gives_the_whole_screen_to_the_list() {
+        let (_tmp, editor) = drawn(60, 20);
+        let chunks = Renderer::editor_layout(Rect::new(0, 0, 60, 20), &editor);
+        assert_eq!(chunks[0].width, 0, "tidak ada kolom teks");
+        assert_eq!(chunks[3].width, 60, "list selebar layar");
+        assert_eq!(editor.ui_hit.divider, None, "tidak ada yang bisa di-resize");
+    }
+
+    /// Opening a file from the list turns it into the detail pane, full width.
+    #[test]
+    fn opening_a_file_in_a_narrow_window_fills_the_screen_with_it() {
+        let (tmp, mut editor) = drawn(60, 20);
+        let path = tmp.path().join("a.rs");
+        editor.open_file(path.to_str().unwrap()).unwrap();
+        editor.enter_mode(EditorMode::Edit);
+        editor.sidebar.as_mut().unwrap().focused = false;
+
+        let chunks = Renderer::editor_layout(Rect::new(0, 0, 60, 20), &editor);
+        assert_eq!(chunks[0].width, 60, "berkas selebar layar");
+        assert_eq!(chunks[3].width, 0, "list tidak menemani");
+    }
+
+    /// `Esc` in the file goes back to the list; `Esc` again returns to the file.
+    #[test]
+    fn esc_walks_between_the_list_and_the_file() {
+        let (tmp, mut editor) = drawn(60, 20);
+        let path = tmp.path().join("a.rs");
+        editor.open_file(path.to_str().unwrap()).unwrap();
+        editor.enter_mode(EditorMode::Edit);
+        editor.sidebar.as_mut().unwrap().focused = false;
+
+        let _ = crate::reducer::reduce(&mut editor, crate::action::Action::Cancel);
+        assert!(editor.sidebar.as_ref().unwrap().focused, "Esc membuka list");
+        // In the list the keymap turns Esc into `SidebarUnfocus` (see `ui::keymap`), which
+        // is the step back to the file.
+        unfocus(&mut editor);
+        assert!(
+            !editor.sidebar.as_ref().unwrap().focused,
+            "Esc di list kembali ke berkas"
+        );
+        assert!(
+            editor.sidebar.as_ref().unwrap().visible,
+            "panel tidak pernah disembunyikan di layar sempit"
+        );
+    }
+
+    /// The pane switch: `‹ Files` on the file, `» Edit` on the list — both clickable.
+    #[test]
+    fn the_pane_switch_chip_goes_both_ways() {
+        let (tmp, mut editor) = drawn(60, 20);
+        let path = tmp.path().join("a.rs");
+        editor.open_file(path.to_str().unwrap()).unwrap();
+        editor.enter_mode(EditorMode::Edit);
+        editor.sidebar.as_mut().unwrap().focused = false;
+
+        // Draw again: the chip lives on the status row now that the file has the screen.
+        let mut terminal = Terminal::new(TestBackend::new(60, 20)).unwrap();
+        let draw = |editor: &mut EditorState, terminal: &mut Terminal<TestBackend>| {
+            terminal
+                .draw(|f| {
+                    editor.ui_hit = UiHit {
+                        screen: crate::sidebar::Area::from(f.area()),
+                        ..Default::default()
+                    };
+                    let chunks = Renderer::editor_layout(f.area(), editor);
+                    Renderer::render_body(editor, f, chunks[0]);
+                    Renderer::render_shortcuts(editor, f, chunks[1]);
+                    Renderer::render_status_bar(editor, f, chunks[2]);
+                    Renderer::render_sidebar(editor, f, chunks[3]);
+                })
+                .unwrap();
+        };
+        draw(&mut editor, &mut terminal);
+        let chip = editor.ui_hit.pane_toggle.expect("‹ Files di baris status");
+        let _ = mouse_down(&mut editor, MouseButton::Left, chip.x + 1, chip.y);
+        assert!(editor.sidebar.as_ref().unwrap().focused, "chip → list");
+
+        draw(&mut editor, &mut terminal);
+        let chip = editor.ui_hit.pane_toggle.expect("» Edit di header list");
+        let _ = mouse_down(&mut editor, MouseButton::Left, chip.x + 1, chip.y);
+        assert!(!editor.sidebar.as_ref().unwrap().focused, "chip → berkas");
+    }
+
+    /// A wide window keeps the old behaviour: the panel folds away, and the same key
+    /// brings it back.
+    #[test]
+    fn a_wide_window_folds_the_panel_away() {
+        let (_tmp, mut editor) = drawn(100, 20);
+        editor.sidebar.as_mut().unwrap().focused = true;
+        fold_panel(&mut editor);
+        assert!(
+            !editor.sidebar.as_ref().unwrap().visible,
+            "panel disembunyikan"
+        );
+        focus(&mut editor, SidebarTab::Files);
+        assert!(
+            editor.sidebar.as_ref().unwrap().visible,
+            "Alt+B membukanya lagi"
+        );
+        // …and pressing it again hides it, as before.
+        focus(&mut editor, SidebarTab::Files);
+        assert!(!editor.sidebar.as_ref().unwrap().visible);
+    }
+
+    /// In a narrow window the same key must never hide the panel: it is the list.
+    #[test]
+    fn a_narrow_window_never_hides_the_panel() {
+        let (_tmp, mut editor) = drawn(60, 20);
+        editor.sidebar.as_mut().unwrap().focused = true;
+        focus(&mut editor, SidebarTab::Files);
+        focus(&mut editor, SidebarTab::Files);
+        assert!(editor.sidebar.as_ref().unwrap().visible);
     }
 
     #[test]

@@ -93,7 +93,8 @@ Control tab over the same folder.
 Ctrl+S Save   Ctrl+B Browse ...  │
 ```
 
-- `Alt+B` — focus the **Files** tab (again to hide the panel)
+- `Alt+B` — focus the **Files** tab (again to hide the panel; on a narrow terminal it
+  shows the list and never hides it)
 - `Alt+G` — focus the **Git** tab: `git status` in VS Code's two groups, **Staged Changes**
   (the index) and **Changes** (the working tree), each a tree of directories with
   `M`/`A`/`D`/`U` letters, a per-folder count, and the branch name. A file that is staged
@@ -143,6 +144,12 @@ The panel is **mouse-first**:
   drag-to-copy work (the terminal's own selection needs Shift). The text goes to the
   system clipboard, or — when there is none, such as over SSH — to the terminal itself
   with `OSC 52`.
+
+On a **narrow terminal** (below 70 columns) the panel and the text take turns instead of
+sharing — the shape WA-Bot uses: the **list** fills the screen, clicking a row opens that
+file as the **detail**, and `‹ Files` in the status bar (or `Esc`) walks back. The same
+corner button means "fold the panel away" on a wide screen and "back to the list" on a
+narrow one, so there is always something to click.
 
 ⚠️ While the panel is up the terminal hands the mouse to cozy, so the terminal's own
 drag-to-select needs **Shift**. Hiding the panel (`Alt+B` twice) gives plain drag-select

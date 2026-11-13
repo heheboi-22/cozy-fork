@@ -249,7 +249,7 @@ fn test_help_renders_without_panic_at_various_sizes() {
                 let chunks = Renderer::editor_layout(f.area(), &editor);
                 Renderer::render_body(&mut editor, f, chunks[0]);
                 Renderer::render_shortcuts(&editor, f, chunks[1]);
-                Renderer::render_status_bar(&editor, f, chunks[2]);
+                Renderer::render_status_bar(&mut editor, f, chunks[2]);
             })
             .unwrap();
     }
