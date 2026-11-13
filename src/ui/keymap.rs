@@ -95,6 +95,21 @@ impl Keymap {
             return Some(action);
         }
 
+        // 0.5 The image view owns its keys. They sit above the shortcut table because
+        //     `←`/`→` are bound to text motions there — motions of a cursor that is not
+        //     on screen — and Esc is bound to `Cancel`.
+        if editor.mode == EditorMode::Image && !editor.sidebar.as_ref().is_some_and(|s| s.focused) {
+            let ctrl_c = modifiers.contains(KeyModifiers::CONTROL) && code == KeyCode::Char('c');
+            match code {
+                KeyCode::Char('q') | KeyCode::Esc => return Some(Action::CloseImage),
+                _ if ctrl_c => return Some(Action::CloseImage),
+                KeyCode::Char('z') => return Some(Action::ImageZoom),
+                KeyCode::Left | KeyCode::Char('h') => return Some(Action::ImageStep(-1)),
+                KeyCode::Right | KeyCode::Char('l') => return Some(Action::ImageStep(1)),
+                _ => {}
+            }
+        }
+
         // 1. Check shortcuts (Global) - handles most cases
         if let Some(editor_action) = editor.shortcut_map.get(&(code, modifiers)) {
             match editor_action {
@@ -517,6 +532,15 @@ impl Keymap {
                 KeyCode::Char('k') => Some(Action::CommandMoveUp),
                 KeyCode::Char('j') => Some(Action::CommandMoveDown),
                 KeyCode::Char(c) if is_printable(modifiers) => Some(Action::CommandInput(c)),
+                _ => None,
+            },
+            // The picture: a pager with three verbs, and nothing else — the panel keeps
+            // its own keys when it has the keyboard (`sidebar_action` runs first).
+            EditorMode::Image => match code {
+                KeyCode::Char('q') | KeyCode::Esc => Some(Action::CloseImage),
+                KeyCode::Char('z') => Some(Action::ImageZoom),
+                KeyCode::Left | KeyCode::Char('h') => Some(Action::ImageStep(-1)),
+                KeyCode::Right | KeyCode::Char('l') => Some(Action::ImageStep(1)),
                 _ => None,
             },
             EditorMode::Welcome => match code {

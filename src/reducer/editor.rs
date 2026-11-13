@@ -347,7 +347,10 @@ pub fn apply_editor_event(editor: &mut EditorState, action: &Action) -> EventRes
             let result = editor.open_file(fname);
             // enter_mode() clears status_message, so switch to the resting mode
             // FIRST, then set the outcome message so it survives the transition.
-            editor.enter_mode(editor.home_mode());
+            // A picture opened its own view — the resting mode would close it.
+            if editor.mode != crate::state::EditorMode::Image {
+                editor.enter_mode(editor.home_mode());
+            }
             match result {
                 Ok(_) => {
                     crate::reducer::status::set_success(editor, "Opened", fname);

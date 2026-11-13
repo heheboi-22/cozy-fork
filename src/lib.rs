@@ -168,6 +168,12 @@ pub fn run<W: Write>(
     let report_wheel = config.terminal_size.is_none();
     let mut terminal = create_terminal(writer, config.terminal_size)?;
     let mut editor = create_editor(config);
+    // A picture named on the command line opens once the terminal exists (the viewer
+    // draws with the protocol measured from it).
+    #[cfg(feature = "imageview")]
+    if !editor.view_session {
+        editor.load_pending_image()?;
+    }
 
     event_loop::run(&mut terminal, &mut editor, event_src, report_wheel)?;
 
@@ -197,6 +203,9 @@ fn create_editor(config: CozyConfig) -> EditorState {
     let mut init = EditorStateInit::from_runtime(config.filename, config.config_dir);
     // `czv <folder>` stays a full-screen pager; `cozy <folder>` opens the sidebar instead.
     init.browse_folders = view;
+    // A pager session (`czv`) owns pictures on its own; the editor's image mode is for
+    // the editing session only.
+    init.pager = view;
     let mut editor = EditorState::from_init(init);
     // ⭐ **`view` は `default_mode` より後に、上書きで効かせる。**
     // 🚨 順序が逆だと `default_mode = "glide"` の人が `czv` で編集面に降りる。

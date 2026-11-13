@@ -95,6 +95,16 @@ pub(crate) fn sniff_image(head: &[u8]) -> Option<&'static str> {
     None
 }
 
+/// Does this path hold a picture? Says which format, from the first bytes only — the
+/// editor asks this before it loads a file as text, because a PNG decoded as text is a
+/// screenful of mojibake that no key can undo.
+pub(crate) fn sniff_path(path: &Path) -> Option<&'static str> {
+    let mut head = [0u8; SNIFF_LEN];
+    let mut file = std::fs::File::open(path).ok()?;
+    let n = file.read(&mut head).ok()?;
+    sniff_image(&head[..n])
+}
+
 /// 形式を言い当てるために覗く先頭の長さ。⚠️ AVIF は `ftyp` の互換ブランドまで見ないと
 /// 決められない形がある（major が `mif1` で、`avif` は互換の列にだけ居る）ので 16 では足りない。
 pub(crate) const SNIFF_LEN: usize = 32;
@@ -238,7 +248,7 @@ struct Gallery {
     index: usize,
 }
 
-struct Viewer {
+pub(crate) struct Viewer {
     label: String,
     image: DynamicImage,
     picker: Picker,
@@ -249,6 +259,26 @@ struct Viewer {
     last_area: Rect,
     /// パスで開いたときだけ在る（パイプ入力には無い）。
     gallery: Option<Gallery>,
+}
+
+/// A viewer for the editor to draw **inside its own frame** (the sidebar stays up, the
+/// footer stays cozy's). Same `Viewer` as `czv`; only the terminal is someone else's.
+pub(crate) fn viewer_for_editor(path: &Path) -> io::Result<Viewer> {
+    let (picker, sixel_hi) = editor_picker();
+    let (image, label, gallery) = load_source(ImageSource::Path(path.to_path_buf()))?;
+    let lane = if sixel_hi {
+        SixelLane::Hi
+    } else {
+        SixelLane::Plain
+    };
+    Ok(Viewer::new(label, image, picker, lane, gallery))
+}
+
+/// Which protocol the editor draws with. The session already measured it once — the CLI
+/// in `capture_caps`, an embedded host in `set_caps` — so this asks nothing; halfblocks
+/// is the floor that always works, just blockier.
+fn editor_picker() -> (Picker, bool) {
+    inline::picker().unwrap_or_else(|| (Picker::halfblocks(), false))
 }
 
 /// 絵をビューアで開く（`q`/`Esc` で閉じる・`z` で fit↔等倍・`←`/`→` で同フォルダの前後へ）。
@@ -362,6 +392,49 @@ fn load_source(source: ImageSource) -> io::Result<(DynamicImage, String, Option<
 }
 
 impl Viewer {
+    /// Draw into `area` — the editor's body — without the `czv` footer (cozy has one).
+    pub(crate) fn draw_in(&mut self, f: &mut Frame, area: Rect) {
+        draw_image(f, self, area);
+    }
+
+    /// `z`: fit the window, or show the picture at 1:1 (centre cropped).
+    pub(crate) fn toggle_zoom(&mut self) {
+        self.zoom = match self.zoom {
+            Zoom::Fit => Zoom::Actual,
+            Zoom::Actual => Zoom::Fit,
+        };
+        self.rendered = None;
+    }
+
+    /// `←` / `→`: the previous / next picture in the same folder.
+    pub(crate) fn step(&mut self, delta: isize) {
+        navigate(self, delta);
+    }
+
+    /// The path on screen, when the viewer came from one (a pipe has none).
+    pub(crate) fn path(&self) -> Option<PathBuf> {
+        self.gallery
+            .as_ref()
+            .and_then(|g| g.entries.get(g.index))
+            .cloned()
+    }
+
+    /// Everything cozy's status bar says about the picture, in one line.
+    pub(crate) fn status(&self) -> String {
+        let (w, h) = self.image.dimensions();
+        let zoom = match self.zoom {
+            Zoom::Fit => "fit",
+            Zoom::Actual => "1:1",
+        };
+        let pos = self
+            .gallery
+            .as_ref()
+            .filter(|g| g.entries.len() > 1)
+            .map(|g| format!("  {}/{}", g.index + 1, g.entries.len()))
+            .unwrap_or_default();
+        format!(" Image: {}  {w}×{h}  {zoom}{pos}", self.label)
+    }
+
     fn new(
         label: String,
         image: DynamicImage,
@@ -732,9 +805,13 @@ fn draw(f: &mut Frame, v: &mut Viewer) {
         .direction(Direction::Vertical)
         .constraints([Constraint::Min(1), Constraint::Length(1)])
         .split(f.area());
-    let image_area = chunks[0];
-    let status_area = chunks[1];
+    draw_image(f, v, chunks[0]);
+    render_footer(f, v, chunks[1]);
+}
 
+/// The picture itself: re-encode only when the window moved or the zoom changed, then
+/// place it in the middle of `area`. Shared by `czv` and by the editor's image mode.
+fn draw_image(f: &mut Frame, v: &mut Viewer, image_area: Rect) {
     if v.rendered.is_none() || v.last_area != image_area {
         update(v, image_area);
     }
@@ -749,8 +826,6 @@ fn draw(f: &mut Frame, v: &mut Viewer) {
         }
         None => {}
     }
-
-    render_footer(f, v, status_area);
 }
 
 /// `cells` ぶんの矩形を `area` の中央に置く（はみ出すときは切る）。

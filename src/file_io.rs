@@ -26,6 +26,11 @@ pub(crate) enum StartupDocument {
     Directory {
         path: PathBuf,
     },
+    /// A picture. Decoding a PNG as text is a screenful of mojibake, so the bytes are
+    /// never even read here — the editor opens its image view on the path instead.
+    Image {
+        path: PathBuf,
+    },
     /// 存在するのに読めなかったファイル。**開かない**（＝バッファにも名前にも載せない）。
     /// 🚨 空バッファ＋ファイル名 で開くと、次の `Ctrl+S` が元のバイト列を消す。
     Unreadable {
@@ -212,7 +217,7 @@ pub(crate) fn set_prefetched_stdin(bytes: Vec<u8>) {
     PREFETCHED_STDIN.with(|slot| *slot.borrow_mut() = Some(bytes));
 }
 
-pub(crate) fn load_startup_document(filename: Option<&str>) -> StartupDocument {
+pub(crate) fn load_startup_document(filename: Option<&str>, allow_image: bool) -> StartupDocument {
     let Some(path) = filename else {
         return StartupDocument::Empty;
     };
@@ -230,6 +235,14 @@ pub(crate) fn load_startup_document(filename: Option<&str>) -> StartupDocument {
 
     let expanded = expand_tilde(path);
     let path_ref = expanded.as_path();
+    // ⭐ A picture is decided by its bytes, never by its name (`#20`): opening a PNG as
+    // text writes garbage into the buffer, and every key from then on is a lie.
+    #[cfg(feature = "imageview")]
+    if allow_image && path_ref.is_file() && crate::imageview::sniff_path(path_ref).is_some() {
+        return StartupDocument::Image {
+            path: path_ref.to_path_buf(),
+        };
+    }
     if path_ref.is_dir() {
         return StartupDocument::Directory {
             path: path_ref.to_path_buf(),
@@ -1293,7 +1306,7 @@ mod refusing_unreadable_files {
         let _guard = env_guard();
         let (_tmp, dir) = scratch("new_file");
         let path = dir.join("does-not-exist-yet.md");
-        match load_startup_document(path.to_str()) {
+        match load_startup_document(path.to_str(), true) {
             StartupDocument::File {
                 path: p,
                 lines,
@@ -1321,7 +1334,7 @@ mod refusing_unreadable_files {
         let _guard = env_guard();
         let (_tmp, dir) = scratch("startup_view");
         let path = sjis_file(&dir);
-        match load_startup_document(path.to_str()) {
+        match load_startup_document(path.to_str(), true) {
             StartupDocument::File { format, lines, .. } => {
                 assert!(
                     !format.encoding.is_writable(),
@@ -1448,7 +1461,7 @@ mod byte_for_byte_round_trip {
         let path = dir.join("subject.txt");
         fs::write(&path, original).unwrap();
 
-        let (lines, format) = match load_startup_document(path.to_str()) {
+        let (lines, format) = match load_startup_document(path.to_str(), true) {
             StartupDocument::File { lines, format, .. } => (lines, format),
             _ => panic!("検体 {name} は File として開かれなければならない"),
         };
@@ -1661,7 +1674,7 @@ mod read_only_files {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         let (_tmp, dir) = scratch("startup");
         let (ro, _) = subject(&dir, "ro.txt", 0o444, false);
-        match load_startup_document(ro.to_str()) {
+        match load_startup_document(ro.to_str(), true) {
             StartupDocument::File { read_only, .. } => {
                 assert!(read_only, "444 のファイルを開いて read_only が false")
             }
@@ -1669,7 +1682,7 @@ mod read_only_files {
         }
         // 陽性対照 —— 書けるファイルは名乗らない。
         let (rw, _) = subject(&dir, "rw.txt", 0o644, false);
-        match load_startup_document(rw.to_str()) {
+        match load_startup_document(rw.to_str(), true) {
             StartupDocument::File { read_only, .. } => {
                 assert!(!read_only, "644 のファイルが read_only と報告された")
             }
@@ -1802,7 +1815,7 @@ mod legacy_encodings {
         let (_tmp, dir) = scratch(name);
         let path = dir.join("subject.txt");
         fs::write(&path, bytes).unwrap();
-        let (lines, format) = match load_startup_document(path.to_str()) {
+        let (lines, format) = match load_startup_document(path.to_str(), true) {
             StartupDocument::File { lines, format, .. } => (lines, format),
             _ => panic!("{name}: File として開かれなかった"),
         };
@@ -1834,7 +1847,7 @@ mod legacy_encodings {
         let (_tmp, dir) = scratch("edit");
         let path = dir.join("subject.txt");
         fs::write(&path, SJIS).unwrap();
-        let (lines, format) = match load_startup_document(path.to_str()) {
+        let (lines, format) = match load_startup_document(path.to_str(), true) {
             StartupDocument::File { lines, format, .. } => (lines, format),
             _ => panic!("File として開かれなかった"),
         };
@@ -1860,7 +1873,7 @@ mod legacy_encodings {
         let path = dir.join("subject.txt");
         let junk: &[u8] = &[0xff, 0xfe, 0x80, 0x81, 0x0a];
         fs::write(&path, junk).unwrap();
-        let format = match load_startup_document(path.to_str()) {
+        let format = match load_startup_document(path.to_str(), true) {
             StartupDocument::File { format, .. } => format,
             _ => panic!("`#10` 以降は開く"),
         };
@@ -1893,7 +1906,7 @@ mod legacy_encodings {
     #[test]
     fn prefetched_stdin_feeds_the_text_path_once() {
         set_prefetched_stdin(b"from the slot\n".to_vec());
-        match load_startup_document(Some("-")) {
+        match load_startup_document(Some("-"), true) {
             StartupDocument::Stdin { lines, .. } => {
                 assert_eq!(lines, vec!["from the slot"]);
             }

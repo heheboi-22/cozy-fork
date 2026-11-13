@@ -42,6 +42,7 @@ pub fn render_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {
         EditorMode::DiffReview => render_diff_review_shortcuts(editor, f, area),
         EditorMode::DiffCommitMsg => render_diff_commit_shortcuts(editor, f, area),
         EditorMode::Command => render_command_shortcuts(editor, f, area),
+        EditorMode::Image => render_image_shortcuts(editor, f, area),
     }
 }
 
@@ -306,6 +307,17 @@ pub fn render_status_bar(editor: &EditorState, f: &mut Frame, area: Rect, reserv
                 format!(" {}{}{}{}", name, ro, hint, status),
                 format!("{}/{} ", pos, total),
             )
+        }
+        EditorMode::Image => {
+            #[cfg(feature = "imageview")]
+            let left = editor
+                .image_view
+                .as_ref()
+                .map(|view| view.status())
+                .unwrap_or_else(|| " Image".to_string());
+            #[cfg(not(feature = "imageview"))]
+            let left = " Image (build without the imageview feature)".to_string();
+            (format!("{left}{status}"), String::new())
         }
         EditorMode::FileDiff => {
             let title = editor
@@ -704,6 +716,18 @@ fn render_glide_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {
 /// ⚠️ 4 行入る段（幅 50 未満・高さ 2 行以上）は**両方載る**ので入れ替えない。
 fn quit_takes_the_exit_slot(area: Rect) -> bool {
     area.width < 80
+}
+
+/// The picture's three verbs — the same ones `czv` has.
+fn render_image_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {
+    let pairs: &[(&str, &str)] = &[("q", "Close"), ("z", "Fit/1:1"), ("←→", "Next")];
+    let narrow = area.width < 50;
+    let line = if narrow {
+        compact_line(editor, &pairs[..2])
+    } else {
+        shortcut_line(editor, narrow, pairs)
+    };
+    f.render_widget(Paragraph::new(line), row(area, 0));
 }
 
 fn render_edit_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {

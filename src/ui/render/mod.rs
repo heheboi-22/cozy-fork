@@ -100,6 +100,16 @@ impl Renderer {
 
     pub fn render_body(editor: &mut EditorState, f: &mut Frame, area: Rect) {
         editor.page_size = area.height as usize;
+        // A picture: the body *is* the viewer. No text geometry is recorded, so a click
+        // in the image cannot move a cursor that is not there.
+        #[cfg(feature = "imageview")]
+        if editor.mode == EditorMode::Image {
+            editor.ui_hit.text_area = crate::sidebar::Area::default();
+            if let Some(viewer) = editor.image_view.as_mut() {
+                viewer.draw_in(f, area);
+            }
+            return;
+        }
         if editor.mode == EditorMode::Welcome {
             // ⚠️ 出すのは **error のときだけ**。Welcome に status bar は無いので、
             // ここで拾わない限り理由は消える。逆に info/success まで出すと起動画面が騒がしい。
@@ -210,6 +220,7 @@ fn compact_shortcut_rows(is_narrow: bool, mode: EditorMode) -> u16 {
         | EditorMode::View
         | EditorMode::FileDiff
         | EditorMode::DiffReview
+        | EditorMode::Image
         | EditorMode::Help => 1,
     }
 }
@@ -227,6 +238,7 @@ fn hidden_shortcut_rows(mode: EditorMode) -> u16 {
         | EditorMode::View
         | EditorMode::FileDiff
         | EditorMode::DiffReview
+        | EditorMode::Image
         | EditorMode::Help => 0,
     }
 }

@@ -8,6 +8,7 @@ pub mod editor;
 pub mod file;
 pub mod filediff;
 pub mod helper;
+pub mod image;
 pub mod insert;
 pub mod operator;
 pub mod replace;
@@ -767,6 +768,9 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
             // **3 種類の利用者に効かせるため**（デスクトップ・モバイル・エージェント）。
             // ⭐ 失う物が無い面なので、出口は軽いほどよい（`#14`）。
             crate::state::EditorMode::View => EventResult::Exit,
+            // Defensive: the keymap turns Esc into `CloseImage` first, but a host that
+            // sends `Cancel` directly must leave the picture too.
+            crate::state::EditorMode::Image => image::close(editor),
             // ⭐ One-pane layout: `Esc` in the text is "back to the list" — the same key
             // that leaves every other surface goes back one step here too.
             crate::state::EditorMode::Edit | crate::state::EditorMode::Glide
@@ -779,6 +783,9 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         Action::BrowseExpandOrOpen => browse::expand_or_open(editor),
         Action::BrowseCollapseOrParent => browse::collapse_or_parent(editor),
         Action::CopySelection => selection::copy(editor),
+        Action::CloseImage => image::close(editor),
+        Action::ImageZoom => image::zoom(editor),
+        Action::ImageStep(delta) => image::step(editor, delta),
         Action::HScroll(delta) => {
             if matches!(
                 editor.mode,

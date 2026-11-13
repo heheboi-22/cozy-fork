@@ -106,6 +106,17 @@ pub(crate) fn capture_caps() {
     CAPS.with(|c| *c.borrow_mut() = Some(Caps { picker, sixel_hi }));
 }
 
+/// The picker the CLI measured (or the host declared), when there is one. The editor's
+/// image mode draws with the same protocol the Markdown preview uses — one measurement
+/// for the whole session, never a second question to the terminal.
+pub(crate) fn picker() -> Option<(Picker, bool)> {
+    CAPS.with(|c| {
+        c.borrow()
+            .as_ref()
+            .map(|caps| (caps.picker.clone(), caps.sixel_hi))
+    })
+}
+
 /// 埋め込みホストが申告した能力で caps を立てる（`#22`）—— 問い合わせない。
 ///
 /// ⭐ argotty のように tty を持たないホスト向け（[`capture_caps`] は往復しない）。

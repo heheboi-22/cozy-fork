@@ -157,7 +157,10 @@ pub fn open(editor: &mut EditorState) -> EventResult {
 fn open_path(editor: &mut EditorState, path: &std::path::Path) -> EventResult {
     let path_str = path.to_string_lossy().to_string();
     let result = editor.open_file(&path_str);
-    editor.enter_mode(editor.home_mode());
+    // A picture opens its own view; forcing the home mode would drop it immediately.
+    if editor.mode != crate::state::EditorMode::Image {
+        editor.enter_mode(editor.home_mode());
+    }
     if let Some(sidebar) = editor.sidebar.as_mut() {
         sidebar.focused = false;
     }

@@ -137,6 +137,11 @@ pub enum Action {
     /// Horizontal wheel: move the view left/right when soft wrap is off.
     HScroll(isize),
 
+    // The image view (a picture opened in place of the text).
+    CloseImage,       // q / Esc: back to the buffer that was there before
+    ImageZoom,        // z: fit the window ↔ 1:1 (centre cropped)
+    ImageStep(isize), // ← / →: the previous / next picture in the folder
+
     /// `Ctrl+C`: put the mouse selection on the system clipboard. The mouse already
     /// copies on release; this is the deliberate repeat (and works after a double-click).
     CopySelection,

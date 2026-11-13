@@ -71,6 +71,12 @@ cozy <folder>
   Dockerfile, `diff`/`patch`, `.gitignore`-style files, `~/.ssh/config`, PowerShell, Vim,
   Markdown (and Markdown preview)
 - Markdown preview, including Mermaid diagram blocks (rendering code from `ratatui-markdown`)
+- **Pictures open as pictures.** `cozy photo.png` (PNG, JPEG, GIF, WebP, BMP, ICO, AVIF)
+  draws the image in the body with whatever the terminal speaks — Kitty, iTerm2, Sixel
+  (4096 colours when the terminal allows it) or halfblocks — instead of filling the buffer
+  with binary: `z` fit ↔ 1:1, `←`/`→` the previous/next picture in the folder, `q` back to
+  the text. The sidebar keeps working while the picture is up, and the image never becomes
+  the save target, so `Ctrl+S` cannot write text over it.
 - Fast reading controls in Markdown preview
 - Glide mode for vim-like movement, operators, yanking, changing, deleting, joining, and paste
 - TOML configuration and per-action key overrides

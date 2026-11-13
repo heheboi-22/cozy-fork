@@ -123,6 +123,8 @@ pub enum EditorMode {
     /// 読んでいた」が起きる。
     FileDiff,
     Command,
+    /// A picture, drawn in place of the text (the file was an image, not a document).
+    Image,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -282,6 +284,12 @@ pub struct EditorState {
     pub scrollbar_viewport: usize,
     /// Which scrollbar the pointer is holding, if any.
     pub scroll_drag: Option<ScrollDrag>,
+    /// The picture on screen, when the opened file was an image rather than a document.
+    #[cfg(feature = "imageview")]
+    pub image_view: Option<crate::imageview::Viewer>,
+    /// A picture to open once the terminal's protocol is known (startup only).
+    #[cfg(feature = "imageview")]
+    pub(crate) pending_image: Option<PathBuf>,
     /// The text picked with the mouse, if any. Drawn as a band behind the characters and
     /// copied on release (and by `Ctrl+C`).
     pub selection: Option<Selection>,
@@ -310,6 +318,11 @@ pub(crate) struct EditorStateInit {
     /// `czv <folder>`: keep the full-screen Browser. Everything else opens a folder
     /// argument in the sidebar, which is the same tree with the buffer beside it.
     pub browse_folders: bool,
+    /// A pager session (`czv`, or a host asking for `view`). Pictures are that side's
+    /// business — `czv` has its own full-screen viewer, and without image caps it
+    /// deliberately opens them as text (`#22`'s negative control). So the editor's
+    /// image mode is only armed for the editing session.
+    pub pager: bool,
 }
 
 impl EditorStateInit {
@@ -321,6 +334,7 @@ impl EditorStateInit {
             startup_args: crate::runtime_env::startup_args(),
             startup_time: Instant::now(),
             browse_folders: false,
+            pager: false,
         }
     }
 }
@@ -453,9 +467,13 @@ impl EditorState {
         width > 0 && width < crate::sidebar::MIN_TOTAL_WIDTH
     }
 
-    /// Something worth calling the detail pane: a named file, or an unnamed buffer with
-    /// edits in it.
+    /// Something worth calling the detail pane: a named file, an unnamed buffer with
+    /// edits in it, or a picture being looked at.
     pub fn has_document(&self) -> bool {
+        #[cfg(feature = "imageview")]
+        if self.image_view.is_some() {
+            return true;
+        }
         self.filename.is_some() || self.modified
     }
 
@@ -494,7 +512,8 @@ impl EditorState {
     pub(crate) fn from_init(init: EditorStateInit) -> Self {
         let config = Config::load_from(init.config_dir.as_ref());
         let config_warning = config.load_warnings.first().cloned();
-        let startup_document = crate::file_io::load_startup_document(init.filename.as_deref());
+        let startup_document =
+            crate::file_io::load_startup_document(init.filename.as_deref(), !init.pager);
         // A folder argument re-roots the session: the sidebar, `git status` and relative
         // saves all speak about that folder from now on.
         let working_dir = match &startup_document {
@@ -503,8 +522,25 @@ impl EditorState {
             }
             _ => init.working_dir.clone(),
         };
+        // A picture is opened by the viewer after the terminal exists (it needs the
+        // measured protocol); until then the mode says what is on screen.
+        #[cfg_attr(not(feature = "imageview"), allow(unused_mut))]
+        let mut pending_image: Option<PathBuf> = None;
         let (lines, format, path_buf, initial_mode, browse_tree, startup_error, read_only) =
             match startup_document {
+                // A picture, not a document: no buffer, no save target.
+                crate::file_io::StartupDocument::Image { path } => {
+                    pending_image = Some(path);
+                    (
+                        vec![String::new()],
+                        FileFormat::default(),
+                        None,
+                        EditorMode::Image,
+                        None,
+                        None,
+                        false,
+                    )
+                }
                 crate::file_io::StartupDocument::Empty => (
                     vec![String::new()],
                     FileFormat::default(),
@@ -675,6 +711,10 @@ impl EditorState {
             scrollbar_total: 0,
             scrollbar_viewport: 0,
             scroll_drag: None,
+            #[cfg(feature = "imageview")]
+            image_view: None,
+            #[cfg(feature = "imageview")]
+            pending_image,
             selection: None,
             select_drag: false,
             last_press: None,
@@ -862,6 +902,10 @@ impl EditorState {
                 ));
                 self.status_message = None;
             }
+            EditorMode::Image => {
+                // The picture owns the body; there is nothing to scroll or highlight.
+                self.status_message = None;
+            }
             EditorMode::Markdown => {
                 self.markdown_scroll_offset = 0;
                 self.markdown_cursor_line = 0;
@@ -923,6 +967,13 @@ impl EditorState {
 
     /// ファイルを開く
     pub fn open_file(&mut self, path: &str) -> io::Result<()> {
+        // ⭐ A picture is decided by its bytes (`#20`): decoding a PNG as text fills the
+        // buffer with mojibake and — worse — names it, so `Ctrl+S` would write the
+        // garbage back over the image. The image view keeps `filename` untouched.
+        #[cfg(feature = "imageview")]
+        if self.try_open_image(std::path::Path::new(path))? {
+            return Ok(());
+        }
         let result = crate::file_io::open_file(self, path);
         if result.is_ok() {
             self.highlighter.set_file(self.filename.as_deref());
@@ -930,6 +981,39 @@ impl EditorState {
             self.scroll_x = 0;
         }
         result
+    }
+
+    /// Open `path` in the image view when it is a picture. `Ok(false)` means "not an
+    /// image — go ahead and load it as text". `Ok(true)` means the viewer is on screen.
+    #[cfg(feature = "imageview")]
+    pub(crate) fn try_open_image(&mut self, path: &std::path::Path) -> io::Result<bool> {
+        let Some(format) = crate::imageview::sniff_path(path) else {
+            return Ok(false);
+        };
+        match crate::imageview::viewer_for_editor(path) {
+            Ok(viewer) => {
+                self.image_view = Some(viewer);
+                self.enter_mode(EditorMode::Image);
+                // The footer already names the keys; the format is in the status bar.
+                let _ = format;
+            }
+            // A broken picture is not a reason to open it as text.
+            Err(e) => {
+                self.enter_mode(EditorMode::Image);
+                self.set_status_message(format!("Cannot show image: {e}"), StatusKind::Error, true);
+            }
+        }
+        Ok(true)
+    }
+
+    /// A picture named on the command line opens here — after the terminal exists, since
+    /// the viewer needs the protocol measured from it.
+    #[cfg(feature = "imageview")]
+    pub(crate) fn load_pending_image(&mut self) -> io::Result<()> {
+        match self.pending_image.take() {
+            Some(path) => self.try_open_image(&path).map(|_| ()),
+            None => Ok(()),
+        }
     }
 
     /// Keep the cursor's column on screen when the view is scrolled horizontally. Called

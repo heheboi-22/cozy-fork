@@ -53,7 +53,10 @@ pub fn expand_or_open(editor: &mut EditorState) -> EventResult {
         let path_str = path.to_string_lossy().to_string();
         let result = editor.open_file(&path_str);
         // open_file は失敗時 filename を変えないので、先に resting mode へ遷移してから結果を反映。
-        editor.enter_mode(editor.home_mode());
+        // A picture keeps its own view; forcing the resting mode would close it instantly.
+        if editor.mode != crate::state::EditorMode::Image {
+            editor.enter_mode(editor.home_mode());
+        }
         match result {
             Ok(_) => crate::reducer::status::set_success(editor, "Opened", &path_str),
             Err(e) => crate::reducer::status::set_error(editor, &e.to_string()),
