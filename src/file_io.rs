@@ -31,6 +31,10 @@ pub(crate) enum StartupDocument {
     Image {
         path: PathBuf,
     },
+    /// A PDF: a picture per page, rasterized by `pdftocairo`/`gs` (see `pdfview`).
+    Pdf {
+        path: PathBuf,
+    },
     /// 存在するのに読めなかったファイル。**開かない**（＝バッファにも名前にも載せない）。
     /// 🚨 空バッファ＋ファイル名 で開くと、次の `Ctrl+S` が元のバイト列を消す。
     Unreadable {
@@ -238,10 +242,17 @@ pub(crate) fn load_startup_document(filename: Option<&str>, allow_image: bool) -
     // ⭐ A picture is decided by its bytes, never by its name (`#20`): opening a PNG as
     // text writes garbage into the buffer, and every key from then on is a lie.
     #[cfg(feature = "imageview")]
-    if allow_image && path_ref.is_file() && crate::imageview::sniff_path(path_ref).is_some() {
-        return StartupDocument::Image {
-            path: path_ref.to_path_buf(),
-        };
+    if allow_image && path_ref.is_file() {
+        if crate::imageview::sniff_path(path_ref).is_some() {
+            return StartupDocument::Image {
+                path: path_ref.to_path_buf(),
+            };
+        }
+        if crate::pdfview::sniff_path(path_ref) {
+            return StartupDocument::Pdf {
+                path: path_ref.to_path_buf(),
+            };
+        }
     }
     if path_ref.is_dir() {
         return StartupDocument::Directory {

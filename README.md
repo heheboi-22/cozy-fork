@@ -71,6 +71,12 @@ cozy <folder>
   Dockerfile, `diff`/`patch`, `.gitignore`-style files, `~/.ssh/config`, PowerShell, Vim,
   Markdown (and Markdown preview)
 - Markdown preview, including Mermaid diagram blocks (rendering code from `ratatui-markdown`)
+- **PDFs open as pages.** `cozy doc.pdf` (or `czv doc.pdf`) shows page 1 and turns pages
+  with `←`/`→`, `z` fit ↔ 1:1, `q` back — inside the editor, so the sidebar and the rest of
+  cozy stay. The rasterizer is the one the system already has: poppler's `pdftocairo`, or
+  Ghostscript. Nothing is linked in: MuPDF (the engine `tdf` uses) is AGPL-3.0, which would
+  relicense cozy's MIT/Apache binary, and it is tens of megabytes of C. If neither tool is
+  installed the status bar names the package to install.
 - **Pictures open as pictures.** `cozy photo.png` (PNG, JPEG, GIF, WebP, BMP, ICO, AVIF)
   draws the image in the body with whatever the terminal speaks — Kitty, iTerm2, Sixel
   (4096 colours when the terminal allows it) or halfblocks — instead of filling the buffer

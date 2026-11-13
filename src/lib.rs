@@ -11,6 +11,8 @@ mod host_backend;
 #[cfg(feature = "imageview")]
 mod imageview;
 mod input;
+#[cfg(feature = "imageview")]
+mod pdfview;
 mod reducer;
 mod runtime_env;
 mod shortcuts;

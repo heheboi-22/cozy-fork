@@ -52,6 +52,8 @@ pub(crate) enum ImageSource {
 
 /// `czv` 起動時の分岐の答え（`host.rs` の `run_cli_mode` が訊く）。
 pub(crate) enum Startup {
+    /// A PDF: the same viewer, one page at a time (`←`/`→` turn pages).
+    Pdf(PathBuf),
     /// 絵だった —— ビューアで開く。
     Image(ImageSource),
     /// stdin を読んだが絵ではなかった —— このバイト列を**文章の道へ運ぶこと**
@@ -210,6 +212,8 @@ pub(crate) fn startup_source(filename: Option<&str>) -> Startup {
                 .unwrap_or(0);
             if sniff_image(&head[..n]).is_some() {
                 Startup::Image(ImageSource::Path(expanded))
+            } else if is_pdf_path(&expanded) {
+                Startup::Pdf(expanded)
             } else {
                 Startup::NotImage
             }
@@ -259,6 +263,20 @@ pub(crate) struct Viewer {
     last_area: Rect,
     /// パスで開いたときだけ在る（パイプ入力には無い）。
     gallery: Option<Gallery>,
+    /// Set when the picture is a PDF page: `←`/`→` turn pages instead of files.
+    pdf: Option<PdfDoc>,
+}
+
+/// The document a viewer is showing pages of. Only the page on screen is decoded; moving
+/// to another one rasterizes it (a process, see `pdfview`).
+pub(crate) struct PdfDoc {
+    path: PathBuf,
+    /// 1-based, like the page numbers a PDF reader shows.
+    page: usize,
+    /// `None` when the page count is unknown (`pdfinfo` missing): navigation still works
+    /// forward, it just cannot clamp at the end.
+    pages: Option<usize>,
+    dpi: u32,
 }
 
 /// A viewer for the editor to draw **inside its own frame** (the sidebar stays up, the
@@ -279,6 +297,78 @@ pub(crate) fn viewer_for_editor(path: &Path) -> io::Result<Viewer> {
 /// is the floor that always works, just blockier.
 fn editor_picker() -> (Picker, bool) {
     inline::picker().unwrap_or_else(|| (Picker::halfblocks(), false))
+}
+
+/// `czv file.pdf` — the same viewer, without cozy's frame around it.
+pub(crate) fn run_pdf(path: PathBuf) -> io::Result<()> {
+    let _session = crate::host::TerminalSession::enter(crate::host::TerminalSessionConfig {
+        enable_raw_mode: true,
+        enable_alternate_screen: true,
+    })?;
+    let picker = query_picker().unwrap_or_else(Picker::halfblocks);
+    // ⚠️ The viewer built here has no caps to draw on: ask the terminal like the rest of
+    // `czv` does, and negotiate sixel registers only after it said "sixel".
+    let lane = if picker.protocol_type() == ProtocolType::Sixel
+        && negotiate_sixel_registers().is_some_and(|n| n >= 4096)
+    {
+        SixelLane::Hi
+    } else {
+        SixelLane::Plain
+    };
+    let pages = crate::pdfview::page_count(&path);
+    let image = crate::pdfview::render_page(&path, 1, crate::pdfview::PDF_DPI)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let mut viewer =
+        Viewer::new(crate::pdfview::label(&path), image, picker, lane, None).with_pdf(PdfDoc {
+            path,
+            page: 1,
+            pages,
+            dpi: crate::pdfview::PDF_DPI,
+        });
+    let backend = crate::host_backend::HostBackend::new(io::stdout(), None);
+    let mut terminal = Terminal::new(backend)?;
+    view_loop(
+        &mut terminal,
+        &mut viewer,
+        &mut crate::input::CrosstermEventSource,
+    )
+}
+
+/// `czv` only offers a PDF when something can rasterize it; otherwise the old text path
+/// is the honest fallback (a `%PDF-1.4` dump beats an error nobody asked for).
+fn is_pdf_path(path: &Path) -> bool {
+    crate::pdfview::renderer_available_now() && crate::pdfview::sniff_path(path)
+}
+
+/// A viewer for a PDF: page 1 rasterized, the rest on demand. The page count is a hint
+/// (`pdfinfo`), so a document still opens when that tool is missing.
+pub(crate) fn viewer_for_pdf(path: &Path) -> io::Result<Viewer> {
+    let pages = crate::pdfview::page_count(path);
+    let image = crate::pdfview::render_page(path, 1, crate::pdfview::PDF_DPI)
+        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
+    let (picker, sixel_hi) = editor_picker();
+    let lane = if sixel_hi {
+        SixelLane::Hi
+    } else {
+        SixelLane::Plain
+    };
+    Ok(
+        Viewer::new(crate::pdfview::label(path), image, picker, lane, None).with_pdf(PdfDoc {
+            path: path.to_path_buf(),
+            page: 1,
+            pages,
+            dpi: crate::pdfview::PDF_DPI,
+        }),
+    )
+}
+
+/// The page `delta` steps from `page`, clamped to the document when the count is known.
+pub(crate) fn page_after(page: usize, delta: isize, pages: Option<usize>) -> usize {
+    let next = (page as isize + delta).max(1) as usize;
+    match pages {
+        Some(pages) => next.min(pages.max(1)),
+        None => next,
+    }
 }
 
 /// 絵をビューアで開く（`q`/`Esc` で閉じる・`z` で fit↔等倍・`←`/`→` で同フォルダの前後へ）。
@@ -406,17 +496,26 @@ impl Viewer {
         self.rendered = None;
     }
 
-    /// `←` / `→`: the previous / next picture in the same folder.
+    /// `←` / `→`: the previous / next picture in the same folder — or, for a PDF, the
+    /// previous / next page.
     pub(crate) fn step(&mut self, delta: isize) {
+        if let Some(pdf) = self.pdf.as_mut() {
+            let want = page_after(pdf.page, delta, pdf.pages);
+            if want == pdf.page {
+                return;
+            }
+            match crate::pdfview::render_page(&pdf.path, want, pdf.dpi) {
+                Ok(image) => {
+                    pdf.page = want;
+                    self.image = image;
+                    self.rendered = None;
+                }
+                // Keep the page that is on screen; the status bar already said why.
+                Err(e) => eprintln!("cozy: {e}"),
+            }
+            return;
+        }
         navigate(self, delta);
-    }
-
-    /// The path on screen, when the viewer came from one (a pipe has none).
-    pub(crate) fn path(&self) -> Option<PathBuf> {
-        self.gallery
-            .as_ref()
-            .and_then(|g| g.entries.get(g.index))
-            .cloned()
     }
 
     /// Everything cozy's status bar says about the picture, in one line.
@@ -426,6 +525,16 @@ impl Viewer {
             Zoom::Fit => "fit",
             Zoom::Actual => "1:1",
         };
+        if let Some(pdf) = self.pdf.as_ref() {
+            let pages = pdf
+                .pages
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".to_string());
+            return format!(
+                " PDF: {}  page {}/{}  {w}×{h}  {zoom}",
+                self.label, pdf.page, pages
+            );
+        }
         let pos = self
             .gallery
             .as_ref()
@@ -452,7 +561,19 @@ impl Viewer {
             encode_ms: 0.0,
             last_area: Rect::default(),
             gallery,
+            pdf: None,
         }
+    }
+
+    /// This viewer shows the pages of `pdf`, starting at `page` (1-based).
+    pub(crate) fn with_pdf(mut self, pdf: PdfDoc) -> Self {
+        self.pdf = Some(pdf);
+        self
+    }
+
+    /// The document being paged through, if any.
+    pub(crate) fn pdf(&self) -> Option<&PdfDoc> {
+        self.pdf.as_ref()
     }
 }
 
@@ -523,7 +644,8 @@ fn view_loop<W: io::Write>(
             viewer.rendered = None;
         }
         if delta != 0 {
-            navigate(viewer, delta);
+            // A folder of pictures steps through the folder; a PDF turns pages.
+            viewer.step(delta);
         }
     }
     Ok(())
@@ -971,11 +1093,20 @@ fn render_footer(f: &mut Frame, v: &Viewer, area: Rect) {
         Zoom::Actual => "1:1",
     };
     // フォルダ内の位置（複数あるときだけ）。
-    let pos = v
-        .gallery
-        .as_ref()
-        .filter(|g| g.entries.len() > 1)
-        .map(|g| format!(" {}/{} ", g.index + 1, g.entries.len()));
+    let pos = match v.pdf.as_ref() {
+        Some(pdf) => Some(format!(
+            " {}/{} ",
+            pdf.page,
+            pdf.pages
+                .map(|n| n.to_string())
+                .unwrap_or_else(|| "?".to_string())
+        )),
+        None => v
+            .gallery
+            .as_ref()
+            .filter(|g| g.entries.len() > 1)
+            .map(|g| format!(" {}/{} ", g.index + 1, g.entries.len())),
+    };
     let mut left = vec![
         Span::styled(
             " czv ",
@@ -1238,5 +1369,34 @@ mod tests {
         assert_eq!((r.x, r.y, r.width, r.height), (45, 15, 10, 10));
         let r = centered(area, Size::new(200, 10));
         assert_eq!((r.x, r.width), (0, 100));
+    }
+}
+
+#[cfg(test)]
+mod paging_tests {
+    use super::page_after;
+
+    /// `←`/`→` stops at the first and last page instead of running off the document.
+    #[test]
+    fn pages_are_clamped_when_the_count_is_known() {
+        assert_eq!(page_after(1, -1, Some(3)), 1);
+        assert_eq!(page_after(1, 1, Some(3)), 2);
+        assert_eq!(page_after(3, 1, Some(3)), 3);
+        assert_eq!(page_after(2, -1, Some(3)), 1);
+    }
+
+    /// Without `pdfinfo` the count is unknown: forward still works (the renderer says when
+    /// there is nothing there), backward stops at 1.
+    #[test]
+    fn an_unknown_page_count_only_stops_at_the_start() {
+        assert_eq!(page_after(1, -5, None), 1);
+        assert_eq!(page_after(1, 1, None), 2);
+    }
+
+    /// A single-page document cannot go anywhere.
+    #[test]
+    fn one_page_goes_nowhere() {
+        assert_eq!(page_after(1, 1, Some(1)), 1);
+        assert_eq!(page_after(1, -1, Some(1)), 1);
     }
 }

@@ -528,8 +528,9 @@ impl EditorState {
         let mut pending_image: Option<PathBuf> = None;
         let (lines, format, path_buf, initial_mode, browse_tree, startup_error, read_only) =
             match startup_document {
-                // A picture, not a document: no buffer, no save target.
-                crate::file_io::StartupDocument::Image { path } => {
+                // A picture or a PDF, not a document: no buffer, no save target.
+                crate::file_io::StartupDocument::Image { path }
+                | crate::file_io::StartupDocument::Pdf { path } => {
                     pending_image = Some(path);
                     (
                         vec![String::new()],
@@ -987,15 +988,20 @@ impl EditorState {
     /// image — go ahead and load it as text". `Ok(true)` means the viewer is on screen.
     #[cfg(feature = "imageview")]
     pub(crate) fn try_open_image(&mut self, path: &std::path::Path) -> io::Result<bool> {
-        let Some(format) = crate::imageview::sniff_path(path) else {
+        let picture = crate::imageview::sniff_path(path);
+        if picture.is_none() && !crate::pdfview::sniff_path(path) {
             return Ok(false);
+        }
+        let opened = if picture.is_some() {
+            crate::imageview::viewer_for_editor(path)
+        } else {
+            crate::imageview::viewer_for_pdf(path)
         };
-        match crate::imageview::viewer_for_editor(path) {
+        match opened {
             Ok(viewer) => {
                 self.image_view = Some(viewer);
                 self.enter_mode(EditorMode::Image);
-                // The footer already names the keys; the format is in the status bar.
-                let _ = format;
+                // The footer names the keys; the format/page is in the status bar.
             }
             // A broken picture is not a reason to open it as text.
             Err(e) => {

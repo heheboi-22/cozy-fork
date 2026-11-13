@@ -34,14 +34,11 @@ pub fn zoom(editor: &mut EditorState) -> EventResult {
 pub fn step(editor: &mut EditorState, delta: isize) -> EventResult {
     #[cfg(feature = "imageview")]
     if let Some(viewer) = editor.image_view.as_mut() {
+        // The status bar already shows the page/picture number — a message on top of it
+        // would print the same thing twice on one line.
         viewer.step(delta);
-        let name = viewer
-            .path()
-            .and_then(|p| p.file_name().map(|n| n.to_string_lossy().to_string()))
-            .unwrap_or_default();
-        let status = viewer.status();
-        editor.set_status_message(format!("{name} —{status}"), StatusKind::Info, false);
     }
+    let _ = StatusKind::Info;
     let _ = delta;
     EventResult::Continue
 }
@@ -97,6 +94,49 @@ mod tests {
         );
         close(&mut editor);
         assert_eq!(editor.mode, EditorMode::Edit);
+    }
+
+    /// A PDF opens as a page, not as `%PDF-1.4` text — provided a rasterizer exists.
+    /// The document never becomes the save target either.
+    #[test]
+    fn a_pdf_opens_as_a_page() {
+        if !crate::pdfview::renderer_available() {
+            // No poppler / ghostscript here: the feature is honest about it, and there is
+            // nothing this test could assert without a rasterizer.
+            return;
+        }
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-pdf-")
+            .tempdir()
+            .unwrap();
+        let path = tmp.path().join("doc.pdf");
+        std::fs::write(
+            &path,
+            b"%PDF-1.4\n1 0 obj << /Type /Catalog /Pages 2 0 R >> endobj\n\
+              2 0 obj << /Type /Pages /Kids [3 0 R] /Count 1 >> endobj\n\
+              3 0 obj << /Type /Page /Parent 2 0 R /MediaBox [0 0 300 200] >> endobj\n\
+              trailer << /Root 1 0 R >>\n",
+        )
+        .unwrap();
+
+        let mut editor = EditorState::new(None);
+        editor.buffer = TextBuffer::from_lines(vec!["keep me".to_string()]);
+        editor.open_file(path.to_str().unwrap()).unwrap();
+
+        assert_eq!(editor.mode, EditorMode::Image, "PDF dibuka sebagai halaman");
+        assert!(editor.filename.is_none(), "PDF bukan target Ctrl+S");
+        assert_eq!(
+            editor.buffer.lines,
+            vec!["keep me"],
+            "buffer tidak disentuh"
+        );
+        let status = editor
+            .image_view
+            .as_ref()
+            .map(|v| v.status())
+            .unwrap_or_default();
+        assert!(status.contains("PDF"), "status: {status}");
+        assert!(status.contains("page 1/1"), "status: {status}");
     }
 
     /// A text file still goes the old way.

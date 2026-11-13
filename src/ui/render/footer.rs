@@ -720,7 +720,16 @@ fn quit_takes_the_exit_slot(area: Rect) -> bool {
 
 /// The picture's three verbs — the same ones `czv` has.
 fn render_image_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {
-    let pairs: &[(&str, &str)] = &[("q", "Close"), ("z", "Fit/1:1"), ("←→", "Next")];
+    // A PDF turns pages; a folder of pictures steps through the folder.
+    #[cfg(feature = "imageview")]
+    let is_pdf = editor
+        .image_view
+        .as_ref()
+        .is_some_and(|view| view.pdf().is_some());
+    #[cfg(not(feature = "imageview"))]
+    let is_pdf = false;
+    let step = if is_pdf { "Page" } else { "Next" };
+    let pairs: &[(&str, &str)] = &[("q", "Close"), ("z", "Fit/1:1"), ("←→", step)];
     let narrow = area.width < 50;
     let line = if narrow {
         compact_line(editor, &pairs[..2])

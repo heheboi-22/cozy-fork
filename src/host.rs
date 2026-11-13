@@ -109,6 +109,7 @@ fn run_cli_mode(filename: Option<String>, view: bool) -> io::Result<()> {
     if view {
         match crate::imageview::startup_source(filename.as_deref()) {
             crate::imageview::Startup::Image(src) => return crate::imageview::run(src),
+            crate::imageview::Startup::Pdf(path) => return crate::imageview::run_pdf(path),
             crate::imageview::Startup::StdinText(bytes) => {
                 crate::file_io::set_prefetched_stdin(bytes);
             }
