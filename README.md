@@ -97,9 +97,11 @@ Ctrl+S Save   Ctrl+B Browse ...  │
   `q`/`Esc` back to the list. Changed lines are tinted edge to edge (green added, red
   removed), so a long diff can be scanned without reading every sign. Untracked files open
   as wholly added lines.
-- In the **Files** tab, a folder that holds a removal is tinted red and one that holds an
-  addition orange; a new file's own name is orange too. The rule is the same one VS Code
-  uses, carried by colour instead of a badge.
+- In the **Files** tab the tint is ranked: **red** if anything under it was deleted,
+  otherwise **orange** if something new appeared, otherwise **yellow** if something was
+  changed — and **neutral** when nothing changed, so yellow always means something. The
+  same rule colours a file's own name, and a folder with a removal outranks one with an
+  addition (red wins).
 - `j`/`k` or ↑/↓ move, `Enter`/`l` open a file (or expand a folder), `h` collapse,
   `Tab` switches tabs, `r` re-reads `git status`, `Esc` hands the keyboard back
 

@@ -22,7 +22,10 @@ use crate::state::EditorState;
 
 const ACCENT: Color = Color::Rgb(97, 175, 239);
 const DIM: Color = Color::Rgb(120, 124, 132);
-const FOLDER: Color = Color::Rgb(220, 200, 120);
+/// A folder or file with a change in it: VS Code's `modifiedResourceForeground`.
+const MODIFIED: Color = Color::Rgb(226, 192, 141);
+/// Folders with nothing changed in them — neutral, so yellow can mean something.
+const FOLDER: Color = Color::Rgb(180, 184, 192);
 const TEXT: Color = Color::Rgb(200, 204, 212);
 const ADDED: Color = Color::Rgb(152, 195, 121);
 const DELETED: Color = Color::Rgb(224, 108, 117);
@@ -215,26 +218,27 @@ fn explorer_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<Sid
     (lines, hits)
 }
 
-/// A folder holding a removal is red; one holding an addition is orange; everything else
-/// keeps the folder colour. The same rule tints a file's name in the explorer.
-fn folder_color(flags: ChangeFlags) -> Color {
+/// The explorer's one rule, for folders and files alike: a removal is red, an addition
+/// orange, a change yellow — and a path with nothing changed keeps the neutral colour.
+/// (Red wins over orange, orange over yellow: the louder fact is the one you need.)
+fn tint(flags: ChangeFlags) -> Option<Color> {
     if flags.deleted {
-        DELETED
+        Some(DELETED)
     } else if flags.added {
-        NEW
+        Some(NEW)
+    } else if flags.modified {
+        Some(MODIFIED)
     } else {
-        FOLDER
+        None
     }
 }
 
+fn folder_color(flags: ChangeFlags) -> Color {
+    tint(flags).unwrap_or(FOLDER)
+}
+
 fn file_color(flags: ChangeFlags) -> Color {
-    if flags.deleted {
-        DELETED
-    } else if flags.added {
-        NEW
-    } else {
-        TEXT
-    }
+    tint(flags).unwrap_or(TEXT)
 }
 
 /// What the git view knows about the path the explorer is drawing. Paths in the explorer
@@ -315,7 +319,7 @@ fn git_lines(sidebar: &Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<SidebarH
             spans.push(Span::raw(format!("{indent}{arrow}")));
             spans.push(Span::styled(
                 node.name.clone(),
-                Style::default().fg(FOLDER).add_modifier(Modifier::BOLD),
+                Style::default().fg(MODIFIED).add_modifier(Modifier::BOLD),
             ));
             let (added, deleted) = git.totals_under(idx);
             // A folder's numbers are the sum of its files: present, but quieter.
@@ -577,7 +581,7 @@ mod render_tests {
             .prefix("cozy-tint-")
             .tempdir()
             .unwrap();
-        for dir in ["removed", "added", "plain"] {
+        for dir in ["removed", "added", "plain", "quiet"] {
             fs::create_dir_all(tmp.path().join(dir)).unwrap();
         }
         let mut sidebar = Sidebar::new(tmp.path());
@@ -596,6 +600,7 @@ mod render_tests {
             entries: vec![
                 entry("removed/gone.rs", ' ', 'D'),
                 entry("added/new.rs", '?', '?'),
+                entry("plain/edited.rs", ' ', 'M'),
             ],
             ..Default::default()
         };
@@ -611,26 +616,108 @@ mod render_tests {
         };
         assert_eq!(color_of("removed"), Some(DELETED), "folder dengan hapusan");
         assert_eq!(color_of("added"), Some(NEW), "folder dengan tambahan");
-        assert_eq!(color_of("plain"), Some(FOLDER), "folder biasa");
+        assert_eq!(color_of("plain"), Some(MODIFIED), "folder dengan perubahan");
+        // A folder with nothing changed in it stays neutral — that was the complaint.
+        assert_eq!(
+            color_of("quiet"),
+            Some(FOLDER),
+            "folder tanpa perubahan tidak boleh kuning"
+        );
+        // And so does the root when nothing under it changed... but here things did, so the
+        // root is tinted by what is below it.
+        assert_eq!(color_of(&sidebar.explorer.nodes[0].name), Some(DELETED));
+    }
+
+    /// End to end: the tint must survive the actual draw, cell by cell.
+    #[test]
+    fn a_rendered_explorer_carries_the_colours_to_the_screen() {
+        use crate::sidebar::{GitChanges, GitEntry, GitFile};
+        use crate::state::EditorState;
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+        use std::fs;
+
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-tint-frame-")
+            .tempdir()
+            .unwrap();
+        for dir in ["removed", "plain", "quiet"] {
+            fs::create_dir_all(tmp.path().join(dir)).unwrap();
+        }
+        let entry = |rel: &str, index: char, worktree: char| GitEntry {
+            file: GitFile {
+                rel: std::path::PathBuf::from(rel),
+                index,
+                worktree,
+            },
+            staged: false,
+            added: 0,
+            deleted: 0,
+        };
+
+        let mut editor = EditorState::new(None);
+        let mut sidebar = Sidebar::new(tmp.path());
+        sidebar.git = GitChanges {
+            repo: true,
+            entries: vec![
+                entry("removed/gone.rs", ' ', 'D'),
+                entry("plain/edited.rs", ' ', 'M'),
+            ],
+            ..Default::default()
+        };
+        editor.sidebar = Some(sidebar);
+
+        let mut terminal = Terminal::new(TestBackend::new(40, 12)).unwrap();
+        terminal
+            .draw(|f| render_sidebar(&mut editor, f, f.area()))
+            .unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let color_of_word = |word: &str| -> Option<Color> {
+            for y in 0..buffer.area.height {
+                let row: String = (0..buffer.area.width)
+                    .map(|x| buffer[(x, y)].symbol().to_string())
+                    .collect();
+                if let Some(byte) = row.find(word) {
+                    let x = row[..byte].chars().count() as u16;
+                    return buffer[(x, y)].fg.into();
+                }
+            }
+            None
+        };
+        assert_eq!(color_of_word("removed"), Some(DELETED), "folder hapusan");
+        assert_eq!(color_of_word("plain"), Some(MODIFIED), "folder perubahan");
+        assert_eq!(
+            color_of_word("quiet"),
+            Some(FOLDER),
+            "folder tanpa perubahan"
+        );
     }
 
     #[test]
-    fn a_folder_turns_red_for_a_removal_and_orange_for_an_addition() {
+    fn the_tint_ranks_removal_over_addition_over_change() {
+        let flags = |deleted: bool, added: bool, modified: bool| ChangeFlags {
+            deleted,
+            added,
+            modified,
+        };
         assert_eq!(
-            folder_color(ChangeFlags {
-                deleted: true,
-                added: true
-            }),
+            folder_color(flags(true, true, true)),
             DELETED,
-            "penghapusan lebih keras daripada penambahan"
+            "yang terhapus menang"
+        );
+        assert_eq!(folder_color(flags(false, true, true)), NEW);
+        assert_eq!(folder_color(flags(false, false, true)), MODIFIED);
+        assert_eq!(
+            folder_color(flags(false, false, false)),
+            FOLDER,
+            "folder tanpa perubahan tidak berwarna kuning"
         );
         assert_eq!(
-            folder_color(ChangeFlags {
-                deleted: false,
-                added: true
-            }),
-            NEW
+            file_color(flags(false, false, true)),
+            MODIFIED,
+            "berkas diubah"
         );
-        assert_eq!(folder_color(ChangeFlags::default()), FOLDER);
+        assert_eq!(file_color(flags(false, false, false)), TEXT);
     }
 }

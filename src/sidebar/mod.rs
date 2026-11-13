@@ -203,11 +203,17 @@ impl GitEntry {
 }
 
 /// What lives under a path, for tinting the *explorer* — which only knows files on disk,
-/// not git. Deleted wins over added: a folder holding a removal is the louder fact.
+/// not git. The tint is ranked: a removal outranks an addition, which outranks a change.
+/// A path with nothing changed has all three flags false and is drawn in the neutral
+/// colour (a folder is *not* yellow just for existing).
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct ChangeFlags {
+    /// Something under this path was deleted — the loudest fact, and the one that wins.
     pub deleted: bool,
+    /// Something new appeared (untracked or added to the index).
     pub added: bool,
+    /// Something that already existed was changed.
+    pub modified: bool,
 }
 
 /// The two groups, in the order they are drawn.
@@ -532,10 +538,13 @@ impl GitChanges {
             }
             if entry.file.index == 'D' || entry.file.worktree == 'D' {
                 flags.deleted = true;
+                continue;
             }
             let badge = entry.badge();
             if badge == 'U' || badge == 'A' {
                 flags.added = true;
+            } else {
+                flags.modified = true;
             }
         }
         flags
