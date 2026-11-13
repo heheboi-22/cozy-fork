@@ -15,6 +15,8 @@ pub fn close(editor: &mut EditorState) -> EventResult {
     #[cfg(feature = "imageview")]
     {
         editor.image_view = None;
+        // A load still in flight has nowhere to land; dropping the receiver ends it.
+        editor.image_pending = None;
     }
     editor.enter_mode(editor.home_mode());
     editor.status_message = None;
@@ -60,6 +62,18 @@ mod tests {
         assert_eq!(editor.buffer.lines, vec!["fn main() {}"]);
     }
 
+    /// Open on the worker thread, then collect it — what the event loop does each frame.
+    fn wait_for_picture(editor: &mut EditorState) -> bool {
+        for _ in 0..500 {
+            let changed = editor.poll_image_load();
+            if changed {
+                return editor.image_view.is_some();
+            }
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        false
+    }
+
     /// An image is not a save target: opening one must leave `filename` alone.
     #[test]
     fn opening_an_image_does_not_become_the_save_target() {
@@ -86,12 +100,18 @@ mod tests {
         editor.open_file(path.to_str().unwrap()).unwrap();
 
         assert_eq!(editor.mode, EditorMode::Image, "PNG dibuka sebagai gambar");
+        // ⭐ The screen is up immediately: the decode is on a worker thread.
+        assert!(
+            editor.image_pending.is_some(),
+            "dekode tidak boleh menahan layar"
+        );
         assert!(editor.filename.is_none(), "gambar bukan target Ctrl+S");
         assert_eq!(
             editor.buffer.lines,
             vec!["keep me"],
             "buffer tidak disentuh"
         );
+        assert!(wait_for_picture(&mut editor), "gambar akhirnya tampil");
         close(&mut editor);
         assert_eq!(editor.mode, EditorMode::Edit);
     }
@@ -124,12 +144,17 @@ mod tests {
         editor.open_file(path.to_str().unwrap()).unwrap();
 
         assert_eq!(editor.mode, EditorMode::Image, "PDF dibuka sebagai halaman");
+        assert!(
+            editor.image_pending.is_some(),
+            "rasterisasi tidak boleh menahan layar"
+        );
         assert!(editor.filename.is_none(), "PDF bukan target Ctrl+S");
         assert_eq!(
             editor.buffer.lines,
             vec!["keep me"],
             "buffer tidak disentuh"
         );
+        assert!(wait_for_picture(&mut editor), "halaman akhirnya tampil");
         let status = editor
             .image_view
             .as_ref()

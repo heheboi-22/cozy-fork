@@ -310,11 +310,11 @@ pub fn render_status_bar(editor: &EditorState, f: &mut Frame, area: Rect, reserv
         }
         EditorMode::Image => {
             #[cfg(feature = "imageview")]
-            let left = editor
-                .image_view
-                .as_ref()
-                .map(|view| view.status())
-                .unwrap_or_else(|| " Image".to_string());
+            let left = match (&editor.image_view, &editor.image_pending) {
+                (Some(view), _) => view.status(),
+                (None, Some(pending)) => format!(" {}  loading…", pending.label),
+                (None, None) => " Image".to_string(),
+            };
             #[cfg(not(feature = "imageview"))]
             let left = " Image (build without the imageview feature)".to_string();
             (format!("{left}{status}"), String::new())
@@ -725,7 +725,11 @@ fn render_image_shortcuts(editor: &EditorState, f: &mut Frame, area: Rect) {
     let is_pdf = editor
         .image_view
         .as_ref()
-        .is_some_and(|view| view.pdf().is_some());
+        .is_some_and(|v| v.pdf().is_some())
+        || editor
+            .image_pending
+            .as_ref()
+            .is_some_and(|p| p.kind == crate::imageview::LoadKind::Pdf);
     #[cfg(not(feature = "imageview"))]
     let is_pdf = false;
     let step = if is_pdf { "Page" } else { "Next" };

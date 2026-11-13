@@ -105,8 +105,14 @@ impl Renderer {
         #[cfg(feature = "imageview")]
         if editor.mode == EditorMode::Image {
             editor.ui_hit.text_area = crate::sidebar::Area::default();
-            if let Some(viewer) = editor.image_view.as_mut() {
-                viewer.draw_in(f, area);
+            let pending = editor
+                .image_pending
+                .as_ref()
+                .map(|p| (p.label.clone(), p.started.elapsed()));
+            match (editor.image_view.as_mut(), pending) {
+                (Some(viewer), _) => viewer.draw_in(f, area),
+                (None, Some((label, elapsed))) => body::render_loading(f, area, &label, elapsed),
+                (None, None) => {}
             }
             return;
         }

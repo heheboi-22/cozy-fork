@@ -71,6 +71,10 @@ cozy <folder>
   Dockerfile, `diff`/`patch`, `.gitignore`-style files, `~/.ssh/config`, PowerShell, Vim,
   Markdown (and Markdown preview)
 - Markdown preview, including Mermaid diagram blocks (rendering code from `ratatui-markdown`)
+- **Opening a picture or a PDF never blocks the screen.** Decoding and rasterizing run on
+  a worker thread; the mode switches at once and the body shows a spinner with the file
+  name until the page is ready (the sidebar stays live, `q` still closes). Same viewer,
+  same keys — only the waiting is visible.
 - **PDFs open as pages.** `cozy doc.pdf` (or `czv doc.pdf`) shows page 1 and turns pages
   with `←`/`→`, `z` fit ↔ 1:1, `q` back — inside the editor, so the sidebar and the rest of
   cozy stay. The rasterizer is the one the system already has: poppler's `pdftocairo`, or

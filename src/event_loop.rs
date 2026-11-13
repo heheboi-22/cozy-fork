@@ -69,6 +69,32 @@ fn fetch_generation() -> u64 {
 /// whole screen while it does; the sidebar keeps indexing under the buffer, and its rows
 /// have to appear without a keypress just the same.
 /// A hover highlight is still fading in.
+/// A picture is being decoded on a worker thread (the spinner owns the frame cadence).
+fn image_is_loading(editor: &EditorState) -> bool {
+    #[cfg(feature = "imageview")]
+    {
+        editor.image_loading()
+    }
+    #[cfg(not(feature = "imageview"))]
+    {
+        let _ = editor;
+        false
+    }
+}
+
+/// Take a finished background picture load, if there is one.
+fn poll_image_load(editor: &mut EditorState) -> bool {
+    #[cfg(feature = "imageview")]
+    {
+        editor.poll_image_load()
+    }
+    #[cfg(not(feature = "imageview"))]
+    {
+        let _ = editor;
+        false
+    }
+}
+
 fn hover_is_animating(editor: &EditorState) -> bool {
     editor.sidebar.as_ref().is_some_and(|s| s.hover_animating())
 }
@@ -134,6 +160,11 @@ fn run_loop<W: Write>(
     let mut needs_redraw = true;
     let mut seen_fetches = fetch_generation();
     loop {
+        // ⭐ A background decode / `pdftocairo` that finished since the last frame: swap
+        // the picture in and draw. Cheap when nothing is pending.
+        if poll_image_load(editor) {
+            needs_redraw = true;
+        }
         let want = report_wheel && wants_wheel(&editor.mode);
         if want != *wheel_on {
             let backend = terminal.backend_mut();
@@ -175,7 +206,9 @@ fn run_loop<W: Write>(
         // large folder takes, not as the normal cadence.
         let indexing = browse_is_indexing(editor);
         let arriving = images_are_arriving(editor);
-        let animating = hover_is_animating(editor);
+        // A picture being decoded keeps the spinner turning — and this is also the poll
+        // that notices it finished.
+        let animating = hover_is_animating(editor) || image_is_loading(editor);
         let wait = if animating {
             ANIM_WAIT
         } else if indexing || arriving {

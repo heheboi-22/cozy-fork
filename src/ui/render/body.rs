@@ -8,6 +8,7 @@ use ratatui::{
 
 use crate::state::{EditorMode, EditorState};
 use crate::utils::unicode::display_width_up_to;
+use unicode_width::UnicodeWidthStr;
 
 /// The band behind mouse-selected text. Dark theme: a deep blue that keeps the syntax
 /// colours readable; light theme: VS Code's own light selection.
@@ -379,6 +380,47 @@ fn widest_visible(editor: &EditorState) -> usize {
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
+
+/// A picture is being prepared on a worker thread: one animated line in the middle of
+/// the body, so the screen says "working" instead of looking stuck.
+pub fn render_loading(f: &mut Frame, area: Rect, label: &str, elapsed: std::time::Duration) {
+    if area.width < 8 || area.height == 0 {
+        return;
+    }
+    let text = format!(
+        "{} {label}  {}",
+        loading_frame(elapsed),
+        loading_note(elapsed)
+    );
+    let width = UnicodeWidthStr::width(text.as_str()) as u16;
+    let line = Line::from(Span::styled(
+        text,
+        Style::default().fg(Color::Rgb(200, 204, 212)),
+    ));
+    let rect = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height / 2,
+        width: width.min(area.width),
+        height: 1,
+    };
+    f.render_widget(Paragraph::new(line), rect);
+}
+
+/// The spinner: nine frames, a new one every 80 ms.
+fn loading_frame(elapsed: std::time::Duration) -> char {
+    const FRAMES: [char; 9] = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇'];
+    FRAMES[(elapsed.as_millis() / 80) as usize % FRAMES.len()]
+}
+
+/// After a moment, say what is taking the time — "rendering" for a PDF page is expected,
+/// a stuck spinner is not.
+fn loading_note(elapsed: std::time::Duration) -> &'static str {
+    if elapsed.as_millis() > 1500 {
+        "still loading…"
+    } else {
+        "loading…"
+    }
+}
 
 fn right_align(num: usize, digits: usize) -> String {
     format!(" {:>width$} ", num, width = digits)
@@ -886,6 +928,41 @@ mod selection_render_tests {
         assert_eq!(
             render_line(&editor, 0).spans[0].style.bg,
             Some(SELECTION_DARK)
+        );
+    }
+}
+
+#[cfg(test)]
+mod loading_tests {
+    use super::*;
+
+    /// The spinner turns: nine frames, one every 80 ms, and it comes back around.
+    #[test]
+    fn the_spinner_animates_and_loops() {
+        let at = |ms| loading_frame(std::time::Duration::from_millis(ms));
+        assert_ne!(at(0), at(80), "frame berikutnya berbeda");
+        assert_eq!(at(0), at(80 * 9), "sembilan frame lalu kembali");
+        assert_eq!(at(0), at(80 * 90), "berputar terus");
+        // Every frame is one cell wide, so the line does not jump while it spins.
+        for ms in (0..800).step_by(80) {
+            assert_eq!(
+                UnicodeWidthStr::width(at(ms).to_string().as_str()),
+                1,
+                "frame {ms} ms selebar satu sel"
+            );
+        }
+    }
+
+    /// A slow load says so instead of looking stuck at the same word.
+    #[test]
+    fn a_slow_load_says_it_is_still_working() {
+        assert_eq!(
+            loading_note(std::time::Duration::from_millis(200)),
+            "loading…"
+        );
+        assert_eq!(
+            loading_note(std::time::Duration::from_millis(2000)),
+            "still loading…"
         );
     }
 }

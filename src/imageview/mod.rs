@@ -247,7 +247,7 @@ enum Rendered {
 }
 
 /// 同フォルダの画像を ←/→ でめくるための並び（`#20`・案A）。
-struct Gallery {
+pub(crate) struct Gallery {
     entries: Vec<PathBuf>,
     index: usize,
 }
@@ -270,7 +270,7 @@ pub(crate) struct Viewer {
 /// The document a viewer is showing pages of. Only the page on screen is decoded; moving
 /// to another one rasterizes it (a process, see `pdfview`).
 pub(crate) struct PdfDoc {
-    path: PathBuf,
+    pub(crate) path: PathBuf,
     /// 1-based, like the page numbers a PDF reader shows.
     page: usize,
     /// `None` when the page count is unknown (`pdfinfo` missing): navigation still works
@@ -281,15 +281,83 @@ pub(crate) struct PdfDoc {
 
 /// A viewer for the editor to draw **inside its own frame** (the sidebar stays up, the
 /// footer stays cozy's). Same `Viewer` as `czv`; only the terminal is someone else's.
-pub(crate) fn viewer_for_editor(path: &Path) -> io::Result<Viewer> {
-    let (picker, sixel_hi) = editor_picker();
-    let (image, label, gallery) = load_source(ImageSource::Path(path.to_path_buf()))?;
-    let lane = if sixel_hi {
-        SixelLane::Hi
-    } else {
-        SixelLane::Plain
-    };
-    Ok(Viewer::new(label, image, picker, lane, gallery))
+/// What a background load produced: everything a [`Viewer`] needs except the terminal
+/// protocol, which is built on the drawing thread (it must not cross threads).
+pub(crate) struct Loaded {
+    label: String,
+    image: DynamicImage,
+    gallery: Option<Gallery>,
+    pdf: Option<PdfDoc>,
+}
+
+impl Loaded {
+    /// The viewer for this load. Cheap: no decoding, no encoding — the first frame does
+    /// the resize, exactly as it does after a page turn.
+    pub(crate) fn into_viewer(self) -> Viewer {
+        let (picker, sixel_hi) = editor_picker();
+        let lane = if sixel_hi {
+            SixelLane::Hi
+        } else {
+            SixelLane::Plain
+        };
+        let mut viewer = Viewer::new(self.label, self.image, picker, lane, self.gallery);
+        viewer.pdf = self.pdf;
+        viewer
+    }
+}
+
+/// Decode / rasterize **off the drawing thread**.
+///
+/// 🚨 This is the difference between "opening a picture" and "the editor froze": decoding
+/// a 12MP JPEG or spawning `pdftocairo` costs 50–500 ms, and doing it in the reducer means
+/// no frame, no cursor, no spinner — the screen just stops. The caller keeps a spinner on
+/// screen and collects the result when it arrives.
+pub(crate) fn spawn_load(
+    path: PathBuf,
+    kind: LoadKind,
+) -> std::sync::mpsc::Receiver<Result<Loaded, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let result = match kind {
+            LoadKind::Image => load_source(ImageSource::Path(path))
+                .map(|(image, label, gallery)| Loaded {
+                    label,
+                    image,
+                    gallery,
+                    pdf: None,
+                })
+                .map_err(|e| e.to_string()),
+            LoadKind::Pdf => load_pdf(&path),
+        };
+        // A closed receiver means the user opened something else: dropping the result is
+        // the point, not an error.
+        let _ = tx.send(result);
+    });
+    rx
+}
+
+/// Which loader a path needs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum LoadKind {
+    Image,
+    Pdf,
+}
+
+/// First page of a PDF, plus the document the viewer pages through.
+fn load_pdf(path: &Path) -> Result<Loaded, String> {
+    let pages = crate::pdfview::page_count(path);
+    let image = crate::pdfview::render_page(path, 1, crate::pdfview::PDF_DPI)?;
+    Ok(Loaded {
+        label: crate::pdfview::label(path),
+        image,
+        gallery: None,
+        pdf: Some(PdfDoc {
+            path: path.to_path_buf(),
+            page: 1,
+            pages,
+            dpi: crate::pdfview::PDF_DPI,
+        }),
+    })
 }
 
 /// Which protocol the editor draws with. The session already measured it once — the CLI
@@ -338,28 +406,6 @@ pub(crate) fn run_pdf(path: PathBuf) -> io::Result<()> {
 /// is the honest fallback (a `%PDF-1.4` dump beats an error nobody asked for).
 fn is_pdf_path(path: &Path) -> bool {
     crate::pdfview::renderer_available_now() && crate::pdfview::sniff_path(path)
-}
-
-/// A viewer for a PDF: page 1 rasterized, the rest on demand. The page count is a hint
-/// (`pdfinfo`), so a document still opens when that tool is missing.
-pub(crate) fn viewer_for_pdf(path: &Path) -> io::Result<Viewer> {
-    let pages = crate::pdfview::page_count(path);
-    let image = crate::pdfview::render_page(path, 1, crate::pdfview::PDF_DPI)
-        .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))?;
-    let (picker, sixel_hi) = editor_picker();
-    let lane = if sixel_hi {
-        SixelLane::Hi
-    } else {
-        SixelLane::Plain
-    };
-    Ok(
-        Viewer::new(crate::pdfview::label(path), image, picker, lane, None).with_pdf(PdfDoc {
-            path: path.to_path_buf(),
-            page: 1,
-            pages,
-            dpi: crate::pdfview::PDF_DPI,
-        }),
-    )
 }
 
 /// The page `delta` steps from `page`, clamped to the document when the count is known.

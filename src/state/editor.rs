@@ -287,6 +287,11 @@ pub struct EditorState {
     /// The picture on screen, when the opened file was an image rather than a document.
     #[cfg(feature = "imageview")]
     pub image_view: Option<crate::imageview::Viewer>,
+    /// A picture being decoded / a PDF page being rasterized on a worker thread. The
+    /// screen shows a spinner meanwhile — that is the difference between "opening" and
+    /// "frozen".
+    #[cfg(feature = "imageview")]
+    pub image_pending: Option<ImagePending>,
     /// A picture to open once the terminal's protocol is known (startup only).
     #[cfg(feature = "imageview")]
     pub(crate) pending_image: Option<PathBuf>,
@@ -337,6 +342,18 @@ impl EditorStateInit {
             pager: false,
         }
     }
+}
+
+/// A picture that is still being prepared by a worker thread.
+#[cfg(feature = "imageview")]
+pub struct ImagePending {
+    /// The file name, shown next to the spinner.
+    pub label: String,
+    /// What is being prepared — a PDF turns pages, a picture steps through its folder, and
+    /// the footer says so even before the first frame is ready.
+    pub kind: crate::imageview::LoadKind,
+    pub started: std::time::Instant,
+    pub(crate) rx: std::sync::mpsc::Receiver<Result<crate::imageview::Loaded, String>>,
 }
 
 /// A span of text picked with the mouse: two buffer positions (line, byte), kept in the
@@ -715,6 +732,8 @@ impl EditorState {
             #[cfg(feature = "imageview")]
             image_view: None,
             #[cfg(feature = "imageview")]
+            image_pending: None,
+            #[cfg(feature = "imageview")]
             pending_image,
             selection: None,
             select_drag: false,
@@ -988,28 +1007,58 @@ impl EditorState {
     /// image — go ahead and load it as text". `Ok(true)` means the viewer is on screen.
     #[cfg(feature = "imageview")]
     pub(crate) fn try_open_image(&mut self, path: &std::path::Path) -> io::Result<bool> {
-        let picture = crate::imageview::sniff_path(path);
-        if picture.is_none() && !crate::pdfview::sniff_path(path) {
-            return Ok(false);
-        }
-        let opened = if picture.is_some() {
-            crate::imageview::viewer_for_editor(path)
+        let kind = if crate::imageview::sniff_path(path).is_some() {
+            crate::imageview::LoadKind::Image
+        } else if crate::pdfview::sniff_path(path) {
+            crate::imageview::LoadKind::Pdf
         } else {
-            crate::imageview::viewer_for_pdf(path)
+            return Ok(false);
         };
-        match opened {
-            Ok(viewer) => {
-                self.image_view = Some(viewer);
-                self.enter_mode(EditorMode::Image);
-                // The footer names the keys; the format/page is in the status bar.
-            }
-            // A broken picture is not a reason to open it as text.
-            Err(e) => {
-                self.enter_mode(EditorMode::Image);
-                self.set_status_message(format!("Cannot show image: {e}"), StatusKind::Error, true);
-            }
-        }
+        // ⭐ The decode (or `pdftocairo`) runs on a worker thread; the screen shows a
+        // spinner and stays alive. See `poll_image_load`.
+        let label = path
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+            .unwrap_or_else(|| path.display().to_string());
+        self.image_view = None;
+        self.image_pending = Some(ImagePending {
+            label,
+            kind,
+            started: std::time::Instant::now(),
+            rx: crate::imageview::spawn_load(path.to_path_buf(), kind),
+        });
+        self.enter_mode(EditorMode::Image);
         Ok(true)
+    }
+
+    /// Collect a finished background load. Returns whether anything changed (so the loop
+    /// knows to draw). Cheap enough to call every iteration: `try_recv` on an empty
+    /// channel is a load and a branch.
+    #[cfg(feature = "imageview")]
+    pub fn poll_image_load(&mut self) -> bool {
+        let Some(pending) = self.image_pending.as_ref() else {
+            return false;
+        };
+        let result = match pending.rx.try_recv() {
+            Ok(result) => result,
+            Err(std::sync::mpsc::TryRecvError::Empty) => return false,
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => {
+                Err("the loader stopped without an answer".to_string())
+            }
+        };
+        self.image_pending = None;
+        match result {
+            Ok(loaded) => self.image_view = Some(loaded.into_viewer()),
+            // A broken file is not a reason to open it as text (the bytes are not text).
+            Err(e) => self.set_status_message(format!("Cannot show: {e}"), StatusKind::Error, true),
+        }
+        true
+    }
+
+    /// A picture is still being prepared — the loop keeps animating while this is true.
+    #[cfg(feature = "imageview")]
+    pub fn image_loading(&self) -> bool {
+        self.image_pending.is_some()
     }
 
     /// A picture named on the command line opens here — after the terminal exists, since
