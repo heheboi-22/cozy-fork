@@ -21,9 +21,10 @@ pub(crate) enum StartupDocument {
         /// 保存を押すまで黙っていると、`Ctrl+S` の失敗が唯一の知らせになる（`#7`）。
         read_only: bool,
     },
+    /// A folder argument. It carries the path only: who opens it (the sidebar, or the
+    /// full-screen Browser for `czv`) decides, and only that side pays for the walk.
     Directory {
-        // 裏の索引の受け口などを持って大きいので箱に入れる（他の場合と大きさを揃える）。
-        tree: Box<BrowseTree>,
+        path: PathBuf,
     },
     /// 存在するのに読めなかったファイル。**開かない**（＝バッファにも名前にも載せない）。
     /// 🚨 空バッファ＋ファイル名 で開くと、次の `Ctrl+S` が元のバイト列を消す。
@@ -231,7 +232,7 @@ pub(crate) fn load_startup_document(filename: Option<&str>) -> StartupDocument {
     let path_ref = expanded.as_path();
     if path_ref.is_dir() {
         return StartupDocument::Directory {
-            tree: Box::new(BrowseTree::build(path_ref)),
+            path: path_ref.to_path_buf(),
         };
     }
 

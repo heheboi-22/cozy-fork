@@ -805,12 +805,14 @@ impl Sidebar {
     /// A sidebar rooted at `root`. The explorer reads the top level only; the rest of
     /// the tree arrives from its background index (see `BrowseTree::tick`).
     pub fn new(root: &Path) -> Self {
-        // Only pay for `git status` where there is a repository to ask about.
-        let git = if root.join(".git").exists() {
-            GitChanges::load(root)
-        } else {
-            GitChanges::default()
-        };
+        // Absolute, symlink-free: `cozy .` must name the folder it is showing, and the
+        // git prefix arithmetic needs a real path to strip.
+        let root = std::fs::canonicalize(root).unwrap_or_else(|_| root.to_path_buf());
+        let root = root.as_path();
+        // Ask git every time: a subfolder of a repository has no `.git` of its own, and
+        // that check used to make `cozy src` show nothing at all. Outside a repository
+        // `git status` fails at once and the view says "not a git repository".
+        let git = GitChanges::load(root);
         Self {
             root: root.to_path_buf(),
             visible: true,

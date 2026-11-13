@@ -283,6 +283,9 @@ pub(crate) struct EditorStateInit {
     pub working_dir: PathBuf,
     pub startup_args: Vec<String>,
     pub startup_time: Instant,
+    /// `czv <folder>`: keep the full-screen Browser. Everything else opens a folder
+    /// argument in the sidebar, which is the same tree with the buffer beside it.
+    pub browse_folders: bool,
 }
 
 impl EditorStateInit {
@@ -293,6 +296,7 @@ impl EditorStateInit {
             working_dir: crate::runtime_env::current_working_dir(),
             startup_args: crate::runtime_env::startup_args(),
             startup_time: Instant::now(),
+            browse_folders: false,
         }
     }
 }
@@ -392,6 +396,14 @@ impl EditorState {
         let config = Config::load_from(init.config_dir.as_ref());
         let config_warning = config.load_warnings.first().cloned();
         let startup_document = crate::file_io::load_startup_document(init.filename.as_deref());
+        // A folder argument re-roots the session: the sidebar, `git status` and relative
+        // saves all speak about that folder from now on.
+        let working_dir = match &startup_document {
+            crate::file_io::StartupDocument::Directory { path } if !init.browse_folders => {
+                path.clone()
+            }
+            _ => init.working_dir.clone(),
+        };
         let (lines, format, path_buf, initial_mode, browse_tree, startup_error, read_only) =
             match startup_document {
                 crate::file_io::StartupDocument::Empty => (
@@ -434,15 +446,34 @@ impl EditorState {
                     None,
                     read_only,
                 ),
-                crate::file_io::StartupDocument::Directory { tree } => (
-                    vec![String::new()],
-                    FileFormat::default(),
-                    None,
-                    EditorMode::Browse,
-                    Some(*tree),
-                    None,
-                    false,
-                ),
+                // `cozy <folder>` lands in the editor with the folder in the sidebar —
+                // the same tree, with the buffer beside it (and `Ctrl+B` still gives the
+                // full-screen Browser). `czv <folder>` is a pager: it keeps the full screen.
+                crate::file_io::StartupDocument::Directory { path } => {
+                    if init.browse_folders {
+                        (
+                            vec![String::new()],
+                            FileFormat::default(),
+                            None,
+                            EditorMode::Browse,
+                            Some(crate::browse::BrowseTree::build(
+                                &std::fs::canonicalize(&path).unwrap_or(path.clone()),
+                            )),
+                            None,
+                            false,
+                        )
+                    } else {
+                        (
+                            vec![String::new()],
+                            FileFormat::default(),
+                            None,
+                            Self::resolve_home(&config),
+                            None,
+                            None,
+                            false,
+                        )
+                    }
+                }
                 // 🚨 **ファイル名を引き受けない**のが肝。空バッファ自体は無害だが、そこに
                 // 読めなかったファイルの名前が結びつくと `Ctrl+S` が破壊になる。
                 crate::file_io::StartupDocument::Unreadable { message } => (
@@ -459,8 +490,12 @@ impl EditorState {
         // The left panel is built here rather than on first use, so the folder is on
         // screen from the first frame. Hosts that declared themselves low-spec keep the
         // full width for text (`COZY_COMPACT`), and `COZY_NO_SIDEBAR=1` opts out.
-        let sidebar = (!crate::runtime_env::compact() && !crate::runtime_env::sidebar_disabled())
-            .then(|| crate::sidebar::Sidebar::new(&init.working_dir));
+        // A `czv <folder>` session is a full-screen pager: it draws no panel, so it does
+        // not pay for a tree walk either.
+        let sidebar = (!crate::runtime_env::compact()
+            && !crate::runtime_env::sidebar_disabled()
+            && !init.browse_folders)
+            .then(|| crate::sidebar::Sidebar::new(&working_dir));
 
         Self {
             buffer: TextBuffer::from_lines_with_format(lines, format),
@@ -471,7 +506,7 @@ impl EditorState {
                 h
             },
             filename: path_buf,
-            _working_dir: init.working_dir,
+            _working_dir: working_dir,
             modified: false,
             read_only,
             view_session: false,

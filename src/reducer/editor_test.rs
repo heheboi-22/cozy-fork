@@ -1156,20 +1156,49 @@ fn browse_scratch(name: &str) -> (tempfile::TempDir, std::path::PathBuf) {
     (tmp, base)
 }
 
+/// ⭐ A folder argument lands in the editor with that folder in the **sidebar** — the
+/// full-screen Browser used to open first, which put the tree on screen with no buffer
+/// beside it and no way to type. `Ctrl+B` still gives the Browser (see the tests below).
 #[test]
-fn test_cozy_dir_arg_opens_browse_not_edit() {
+fn test_cozy_dir_arg_opens_the_editor_with_that_folder_in_the_sidebar() {
     let (_tmp, base) = browse_scratch("dir_arg");
-    let editor = EditorState::new(Some(base.to_string_lossy().to_string()));
-    assert_eq!(
-        editor.mode,
-        EditorMode::Browse,
-        "a directory arg must open Browse"
-    );
+    let mut editor =
+        crate::state::EditorState::from_init(crate::state::editor::EditorStateInit::from_runtime(
+            Some(base.to_string_lossy().to_string()),
+            None,
+        ));
+    assert_eq!(editor.mode, EditorMode::Edit, "langsung ke editor");
     assert!(
         editor.filename.is_none(),
         "directory must not become the edit filename"
     );
-    assert!(editor.browse_tree.is_some(), "tree must be built on launch");
+    assert!(
+        editor.browse_tree.is_none(),
+        "no full-screen tree is built for the sidebar path"
+    );
+    let sidebar = editor.sidebar.as_ref().expect("panel dibangun");
+    assert_eq!(
+        sidebar.root,
+        std::fs::canonicalize(&base).unwrap(),
+        "sidebar di-root di folder argumen"
+    );
+    editor.sidebar = None;
+    let _ = std::fs::remove_dir_all(&base);
+}
+
+/// `czv <folder>` is a pager: it keeps the full-screen Browser (no buffer to type into).
+#[test]
+fn test_czv_dir_arg_keeps_the_full_screen_browser() {
+    let (_tmp, base) = browse_scratch("czv_dir");
+    let mut init = crate::state::editor::EditorStateInit::from_runtime(
+        Some(base.to_string_lossy().to_string()),
+        None,
+    );
+    init.browse_folders = true;
+    let editor = crate::state::EditorState::from_init(init);
+    assert_eq!(editor.mode, EditorMode::Browse);
+    assert!(editor.browse_tree.is_some(), "tree dibangun untuk browser");
+    assert!(editor.sidebar.is_none(), "pager tidak punya panel");
     let _ = std::fs::remove_dir_all(&base);
 }
 
@@ -1187,6 +1216,7 @@ fn test_cozy_file_arg_still_opens_edit() {
 fn test_browse_open_file_enters_edit() {
     let (_tmp, base) = browse_scratch("open_file");
     let mut editor = EditorState::new(Some(base.to_string_lossy().to_string()));
+    editor.enter_mode(EditorMode::Browse);
     let main_path = base.join("src/main.rs");
     // Preselect the file, then "open" it via the reducer.
     editor.browse_tree.as_mut().unwrap().select_path(&main_path);
@@ -1214,6 +1244,7 @@ fn test_browse_missing_file_falls_back_to_existing_ancestor() {
 fn test_browse_filter_round_trip() {
     let (_tmp, base) = browse_scratch("filter");
     let mut editor = EditorState::new(Some(base.to_string_lossy().to_string()));
+    editor.enter_mode(EditorMode::Browse);
     reduce(&mut editor, Action::BrowseStartFilter);
     reduce(&mut editor, Action::BrowseFilterChar('m'));
     reduce(&mut editor, Action::BrowseFilterChar('a'));
@@ -1399,6 +1430,7 @@ fn test_glide_home_browse_open_enters_glide() {
     let (_tmp, base) = browse_scratch("glide_open");
     let mut editor = EditorState::new(Some(base.to_string_lossy().to_string()));
     set_glide_home(&mut editor);
+    editor.enter_mode(EditorMode::Browse);
     let main_path = base.join("src/main.rs");
     editor.browse_tree.as_mut().unwrap().select_path(&main_path);
     reduce(&mut editor, Action::BrowseExpandOrOpen);

@@ -51,8 +51,11 @@ cozy
 # Open a file
 cozy <file>
 
-# Browse a directory
+# Open a folder — the editor, with that folder in the sidebar
 cozy <folder>
+
+# The full-screen folder tree is still there
+# (Ctrl+B / F3 inside the editor, or `czv <folder>`)
 ```
 
 ## Highlights

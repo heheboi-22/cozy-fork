@@ -194,10 +194,10 @@ fn create_terminal<W: Write>(
 
 fn create_editor(config: CozyConfig) -> EditorState {
     let view = config.view;
-    let mut editor = EditorState::from_init(EditorStateInit::from_runtime(
-        config.filename,
-        config.config_dir,
-    ));
+    let mut init = EditorStateInit::from_runtime(config.filename, config.config_dir);
+    // `czv <folder>` stays a full-screen pager; `cozy <folder>` opens the sidebar instead.
+    init.browse_folders = view;
+    let mut editor = EditorState::from_init(init);
     // ⭐ **`view` は `default_mode` より後に、上書きで効かせる。**
     // 🚨 順序が逆だと `default_mode = "glide"` の人が `czv` で編集面に降りる。
     //
