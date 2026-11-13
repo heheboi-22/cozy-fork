@@ -54,6 +54,7 @@ pub fn unfocus(editor: &mut EditorState) -> EventResult {
 
 pub fn move_up(editor: &mut EditorState) -> EventResult {
     if let Some(sidebar) = editor.sidebar.as_mut() {
+        sidebar.scroll_parked = false;
         match sidebar.tab {
             SidebarTab::Files => sidebar.explorer.move_up(),
             SidebarTab::Git => sidebar.git.move_up(),
@@ -64,6 +65,7 @@ pub fn move_up(editor: &mut EditorState) -> EventResult {
 
 pub fn move_down(editor: &mut EditorState) -> EventResult {
     if let Some(sidebar) = editor.sidebar.as_mut() {
+        sidebar.scroll_parked = false;
         match sidebar.tab {
             SidebarTab::Files => sidebar.explorer.move_down(),
             SidebarTab::Git => sidebar.git.move_down(),
@@ -74,6 +76,7 @@ pub fn move_down(editor: &mut EditorState) -> EventResult {
 
 pub fn goto_top(editor: &mut EditorState) -> EventResult {
     if let Some(sidebar) = editor.sidebar.as_mut() {
+        sidebar.scroll_parked = false;
         match sidebar.tab {
             SidebarTab::Files => sidebar.explorer.goto_top(),
             SidebarTab::Git => sidebar.git.goto_top(),
@@ -84,6 +87,7 @@ pub fn goto_top(editor: &mut EditorState) -> EventResult {
 
 pub fn goto_bottom(editor: &mut EditorState) -> EventResult {
     if let Some(sidebar) = editor.sidebar.as_mut() {
+        sidebar.scroll_parked = false;
         match sidebar.tab {
             SidebarTab::Files => sidebar.explorer.goto_bottom(),
             SidebarTab::Git => sidebar.git.goto_bottom(),
@@ -166,12 +170,17 @@ pub fn refresh(editor: &mut EditorState) -> EventResult {
     };
     sidebar.refresh_git();
     let (repo, count) = (sidebar.git.repo, sidebar.git.count());
+    let staged = sidebar.git.staged_count();
+    let unstaged = sidebar.git.unstaged_count();
+    let repos = sidebar.git.repos.iter().filter(|r| r.count > 0).count();
     let msg = if !repo {
         "Not a git repository".to_string()
     } else if count == 0 {
         "Working tree clean".to_string()
+    } else if repos > 1 {
+        format!("{count} change(s) in {repos} repositories ({staged} staged, {unstaged} unstaged)")
     } else {
-        format!("{count} change(s)")
+        format!("{count} change(s) ({staged} staged, {unstaged} unstaged)")
     };
     crate::reducer::status::set_info(editor, &msg);
     EventResult::Continue
@@ -221,7 +230,17 @@ pub fn mouse_down(
         return EventResult::Continue;
     }
 
-    // 2. The panel: header tabs, then rows.
+    // 2. The panel's scrollbar: grabbing it moves the viewport without selecting
+    //    anything, exactly like the wheel it replaces.
+    if let Some(bar) = hit.sidebar_vbar
+        && bar.contains(col, row)
+    {
+        editor.scroll_drag = Some(crate::state::ScrollDrag::Sidebar);
+        scroll_panel_to(editor, row);
+        return EventResult::Continue;
+    }
+
+    // 3. The panel: header tabs, then rows.
     if hit.sidebar.contains(col, row) {
         if let Some(tab) = hit.tab_at(col, row) {
             return select_tab(editor, tab);
@@ -232,7 +251,34 @@ pub fn mouse_down(
         return EventResult::Continue;
     }
 
-    // 3. The buffer: put the cursor where the character was drawn.
+    // 4. The text's scrollbars: vertical parks the view on the row, horizontal on the
+    //    column. Neither moves the cursor, which is what a scrollbar is for.
+    if let Some(bar) = hit.editor_vbar
+        && bar.contains(col, row)
+        && matches!(
+            editor.mode,
+            crate::state::EditorMode::Edit | crate::state::EditorMode::Glide
+        )
+    {
+        editor.scroll_drag = Some(crate::state::ScrollDrag::EditorVertical);
+        editor.scroll_parked = true;
+        scroll_text_to_row(editor, row);
+        return EventResult::Continue;
+    }
+    if let Some(bar) = hit.editor_hbar
+        && bar.contains(col, row)
+        && matches!(
+            editor.mode,
+            crate::state::EditorMode::Edit | crate::state::EditorMode::Glide
+        )
+    {
+        editor.scroll_drag = Some(crate::state::ScrollDrag::EditorHorizontal);
+        editor.scroll_parked = true;
+        scroll_text_to_col(editor, col);
+        return EventResult::Continue;
+    }
+
+    // 5. The buffer: put the cursor where the character was drawn.
     if hit.text_area.contains(col, row)
         && matches!(
             editor.mode,
@@ -293,12 +339,76 @@ fn click_row(editor: &mut EditorState, node: usize) -> EventResult {
         }
         // Selection is also a focus move: the keyboard should follow the eye.
         sidebar.focused = true;
+        sidebar.scroll_parked = false;
     }
     open(editor)
 }
 
+/// Dragging a scrollbar. The pointer row (or column) maps through the same geometry the
+/// bar was drawn with, so the thumb stays under the hand.
+fn scroll_panel_to(editor: &mut EditorState, row: u16) {
+    let Some(bar) = editor.ui_hit.sidebar_vbar else {
+        return;
+    };
+    let cell = row.saturating_sub(bar.y) as usize;
+    let track = bar.h as usize;
+    let Some(sidebar) = editor.sidebar.as_mut() else {
+        return;
+    };
+    let total = match sidebar.tab {
+        SidebarTab::Files => sidebar.explorer.visible_nodes().len(),
+        SidebarTab::Git => sidebar.git.visible().len(),
+    };
+    let offset = crate::ui::render::scrollbar::offset_at(track, total, track, cell);
+    match sidebar.tab {
+        SidebarTab::Files => sidebar.explorer.scroll = offset,
+        SidebarTab::Git => sidebar.git.scroll = offset,
+    }
+    sidebar.scroll_parked = true;
+}
+
+fn scroll_text_to_row(editor: &mut EditorState, row: u16) {
+    let Some(bar) = editor.ui_hit.editor_vbar else {
+        return;
+    };
+    let cell = row.saturating_sub(bar.y) as usize;
+    editor.scroll_offset = crate::ui::render::scrollbar::offset_at(
+        bar.h as usize,
+        editor.scrollbar_total,
+        editor.scrollbar_viewport,
+        cell,
+    )
+    .min(editor.max_scroll_offset());
+}
+
+fn scroll_text_to_col(editor: &mut EditorState, col: u16) {
+    let Some(bar) = editor.ui_hit.editor_hbar else {
+        return;
+    };
+    let cell = col.saturating_sub(bar.x) as usize;
+    let viewport = editor.text_display_width;
+    let total = viewport + editor.max_scroll_x();
+    editor.scroll_x =
+        crate::ui::render::scrollbar::offset_at(bar.w as usize, total, viewport, cell);
+}
+
 /// Dragging the divider. The panel keeps a sane range no matter where the pointer is.
 pub fn mouse_drag(editor: &mut EditorState, col: u16, row: u16) -> EventResult {
+    match editor.scroll_drag {
+        Some(crate::state::ScrollDrag::Sidebar) => {
+            scroll_panel_to(editor, row);
+            return EventResult::Continue;
+        }
+        Some(crate::state::ScrollDrag::EditorVertical) => {
+            scroll_text_to_row(editor, row);
+            return EventResult::Continue;
+        }
+        Some(crate::state::ScrollDrag::EditorHorizontal) => {
+            scroll_text_to_col(editor, col);
+            return EventResult::Continue;
+        }
+        None => {}
+    }
     if !editor.sidebar_drag {
         return EventResult::Continue;
     }
@@ -316,6 +426,7 @@ pub fn mouse_drag(editor: &mut EditorState, col: u16, row: u16) -> EventResult {
 
 pub fn mouse_up(editor: &mut EditorState) -> EventResult {
     editor.sidebar_drag = false;
+    editor.scroll_drag = None;
     EventResult::Continue
 }
 
@@ -349,6 +460,8 @@ pub fn mouse_scroll(editor: &mut EditorState, delta: isize, col: u16, row: u16) 
             SidebarTab::Files => sidebar.explorer.scroll_by(delta),
             SidebarTab::Git => sidebar.git.scroll_by(delta),
         }
+        // The pointer owns the window until the keyboard asks for the selection back.
+        sidebar.scroll_parked = true;
         return EventResult::Continue;
     }
     crate::reducer::reduce(editor, crate::action::Action::Wheel(delta))
@@ -395,6 +508,75 @@ mod tests {
         };
         editor.ui_hit.rows = rows;
         (tmp, editor)
+    }
+
+    /// The panel's scrollbar: a grab moves the viewport and leaves the selection where
+    /// it was — the same contract as the wheel.
+    #[test]
+    fn grabbing_the_panel_scrollbar_scrolls_without_selecting() {
+        let (_tmp, mut editor) = editor_with_panel();
+        // As the renderer would have recorded it: one column, two rows of travel.
+        editor.ui_hit.sidebar_vbar = Some(Area::new(32, 2, 1, 2));
+        let before = editor.sidebar.as_ref().unwrap().explorer.selected;
+        let _ = mouse_down(&mut editor, MouseButton::Left, 32, 3);
+        assert_eq!(
+            editor.scroll_drag,
+            Some(crate::state::ScrollDrag::Sidebar),
+            "grab tercatat"
+        );
+        {
+            let sidebar = editor.sidebar.as_ref().unwrap();
+            assert!(sidebar.explorer.scroll > 0, "viewport bergeser");
+            assert_eq!(sidebar.explorer.selected, before, "seleksi tidak ikut");
+        }
+        // Dragging back to the top returns the view to the top.
+        let _ = mouse_drag(&mut editor, 32, 2);
+        assert_eq!(editor.sidebar.as_ref().unwrap().explorer.scroll, 0);
+        let _ = mouse_up(&mut editor);
+        assert_eq!(editor.scroll_drag, None, "lepas tombol mengakhiri grab");
+    }
+
+    /// The keyboard takes the window back: `j` after a wheel may not leave the selection
+    /// off screen.
+    #[test]
+    fn a_key_moves_the_panel_back_to_its_selection() {
+        let (_tmp, mut editor) = editor_with_panel();
+        editor.ui_hit.sidebar_vbar = Some(Area::new(32, 2, 1, 2));
+        let _ = mouse_down(&mut editor, MouseButton::Left, 32, 3);
+        assert!(editor.sidebar.as_ref().unwrap().scroll_parked);
+        move_down(&mut editor);
+        assert!(!editor.sidebar.as_ref().unwrap().scroll_parked);
+    }
+
+    /// The editor's bars: the vertical one parks the window, the horizontal one moves it
+    /// sideways, and neither touches the cursor.
+    #[test]
+    fn the_editor_scrollbars_move_the_window_not_the_cursor() {
+        let mut editor = EditorState::new(None);
+        editor.buffer =
+            crate::state::TextBuffer::from_lines((0..100).map(|i| format!("line {i}")).collect());
+        editor.enter_mode(crate::state::EditorMode::Edit);
+        editor.page_size = 10;
+        editor.scrollbar_total = 100;
+        editor.scrollbar_viewport = 10;
+        editor.ui_hit.editor_vbar = Some(Area::new(80, 0, 1, 10));
+        let _ = mouse_down(&mut editor, MouseButton::Left, 80, 9);
+        assert!(editor.scroll_offset > 0, "jendela bergeser");
+        assert!(editor.scroll_parked);
+        assert_eq!(editor.cursor.y, 0, "kursor tidak ikut");
+
+        editor.soft_wrap = false;
+        editor.text_display_width = 40;
+        editor.buffer =
+            crate::state::TextBuffer::from_lines(vec!["x".repeat(200), "short".to_string()]);
+        editor.scroll_offset = 0;
+        editor.ui_hit.editor_hbar = Some(Area::new(0, 9, 40, 1));
+        let _ = mouse_down(&mut editor, MouseButton::Left, 39, 9);
+        assert_eq!(editor.scroll_x, 160, "sampai ujung kanan");
+        assert_eq!(
+            editor.scroll_drag,
+            Some(crate::state::ScrollDrag::EditorHorizontal)
+        );
     }
 
     #[test]

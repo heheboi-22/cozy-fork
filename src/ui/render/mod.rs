@@ -5,6 +5,7 @@ pub mod filediff;
 pub mod footer;
 pub mod markdown;
 pub mod screen;
+pub mod scrollbar;
 pub mod sidebar;
 
 use ratatui::{

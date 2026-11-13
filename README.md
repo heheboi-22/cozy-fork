@@ -95,6 +95,12 @@ Ctrl+S Save   Ctrl+B Browse ...  │
   and modified again appears in both groups.
 - Every row carries **how many lines changed** — `+12 −3` per file, summed per folder and
   per group, right-aligned and coloured green/red (binary changes show no count).
+- **Nested repositories are tracked too.** A folder that holds other git repositories — a
+  submodule, a vendored clone, a workspace of projects — gets one header per repository,
+  each with its own Staged/Changes groups, branch and counts. `git status` in the outer
+  repository shows a nested one as a single opaque row (or hides it entirely when it is
+  ignored), which is exactly the information a change list must not lose. Build and
+  package folders (`node_modules`, `target`, `dist`, …) are not walked.
 - **Click a change to read its hunks** — a single-file diff view opens beside the panel:
   `@@` headers, `+`/`-` lines with both line-number gutters, `n`/`N` to jump between hunks,
   `q`/`Esc` back to the list. Changed lines are tinted edge to edge (green added, red
@@ -118,6 +124,10 @@ The panel is **mouse-first**:
 - wheel over the panel — scrolls the list; the **selection stays put**, so reading never
   changes what Enter would open (the same is true of the wheel in the buffer: it scrolls the
   viewport, the cursor does not move until you press a key)
+- **scrollbars** — the sidebar's track appears when the tree is taller than the panel, and
+  the text gets a vertical bar when the buffer overflows and a horizontal one when soft wrap
+  is off and a line runs past the window. Click or drag a bar to move the view; neither
+  moves the cursor or the selection.
 - hovering a row lights it up (a short fade); hover is the pointer's state, never the
   scroll's, and moving within the same row does not repaint
 - drag the panel's right border — resizes it (never past half the screen)

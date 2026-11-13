@@ -98,6 +98,11 @@ pub struct UiHit {
     pub rows: Vec<SidebarHit>,
     /// The text area and where the text itself starts inside it (past the gutter).
     pub text_area: Area,
+    /// The scrollbars drawn last frame, if they were needed. A press here starts a
+    /// drag instead of putting the cursor in the text.
+    pub sidebar_vbar: Option<Area>,
+    pub editor_vbar: Option<Area>,
+    pub editor_hbar: Option<Area>,
     pub text_x: u16,
     pub text_width: u16,
 }
@@ -147,9 +152,18 @@ impl SidebarTab {
 
 /// One `git status` entry: the two porcelain columns plus the path, relative to the
 /// sidebar root (not the repository root — `GitChanges::load` strips the cwd prefix).
+///
+/// `rel` is what the tree nests by, and it is unique across repositories because it is
+/// measured from the one folder the panel is rooted at. The two repository fields are
+/// what a `git` command needs: which repo to ask (`repo`) and the path to name inside it
+/// (`in_repo`). A nested repository makes those different from `rel`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GitFile {
     pub rel: PathBuf,
+    /// Repository root to run `git` in (absolute).
+    pub repo: PathBuf,
+    /// The same file, relative to `repo` — the argument for `git diff --`.
+    pub in_repo: PathBuf,
     /// Index (staged) column of `git status --porcelain`.
     pub index: char,
     /// Work-tree (unstaged) column of `git status --porcelain`.
@@ -252,6 +266,29 @@ pub struct GitNode {
     pub file: Option<usize>,
     /// `Some` for the two section headers ("Staged Changes" / "Changes").
     pub group: Option<GitGroup>,
+    /// `Some` for the header of a repository, when the panel speaks about more than one
+    /// (a folder holding several nested repositories). The index is into
+    /// [`GitChanges::repos`]; the group headers below it carry the same one.
+    pub repo: Option<usize>,
+}
+
+/// One repository the panel speaks about: the folder the editor is rooted at, and any
+/// repository nested inside it (a submodule, a vendored clone, a workspace of projects).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct GitRepo {
+    /// Where this repository's root sits relative to the sidebar root (empty for the
+    /// root folder's own repository).
+    pub rel: PathBuf,
+    /// The name on its header row: the folder's own name for the root repository, the
+    /// path inside the panel for a nested one.
+    pub name: String,
+    /// Absolute repository root — what `git -C` gets, and what a diff is read from.
+    pub dir: PathBuf,
+    pub branch: Option<String>,
+    /// This repository's rows in [`GitChanges::entries`], as `(first, count)`. Contiguous
+    /// by construction: `absorb` appends one repository at a time.
+    pub first: usize,
+    pub count: usize,
 }
 
 /// The Source Control view: branch, the two groups, and a tree over their paths.
@@ -260,6 +297,9 @@ pub struct GitChanges {
     /// `false` when the root is not inside a git work tree (no error, just empty).
     pub repo: bool,
     pub branch: Option<String>,
+    /// Every repository the view read, in the order they were read: the root's own
+    /// repository first (when there is one), then the nested ones.
+    pub repos: Vec<GitRepo>,
     pub entries: Vec<GitEntry>,
     pub nodes: Vec<GitNode>,
     pub selected: usize,
@@ -273,20 +313,39 @@ impl GitChanges {
     /// Read `git status` under `root`. Never fails: a missing git binary, a folder that
     /// is not a repository, or a broken repo all end up as a flag or an `error` string,
     /// so the view can say what happened instead of going blank.
+    ///
+    /// Two kinds of repository are read, because a folder can be both:
+    /// - the one the folder itself sits in (its own, or an ancestor's — `cozy src` inside
+    ///   a repo must still list that repo's changes under `src/`);
+    /// - every repository nested inside it (a submodule, a vendored clone, a workspace
+    ///   holding several projects). `git status` in the outer repo only ever shows one
+    ///   opaque row for those, which is exactly the information a change list must not
+    ///   lose.
     pub fn load(root: &Path) -> Self {
         let mut changes = Self::default();
-        match git_status(root) {
-            Ok((text, prefix)) => {
+        // Found before the first read, because the outer repository's status shows one
+        // shadow row (`?? sub/`) for each of them, and that row must be dropped.
+        let nested = nested_repos(root);
+        let nested_rel: Vec<PathBuf> = nested
+            .iter()
+            .filter_map(|dir| dir.strip_prefix(root).ok().map(Path::to_path_buf))
+            .collect();
+        match RepoStatus::load(root, root) {
+            Ok(status) => {
                 changes.repo = true;
-                // The counts come from `git diff --numstat`, one call per side: the
-                // porcelain status says *that* a file changed, never how much.
-                let staged = numstat(root, &prefix, true);
-                let unstaged = numstat(root, &prefix, false);
-                changes.absorb(root, &text, &prefix, &staged, &unstaged);
+                changes.absorb(root, &status, &nested_rel);
             }
             Err(err) if err.contains("not a git repository") => {}
             Err(err) => changes.error = Some(err),
         }
+        for dir in &nested {
+            // One broken nested repo must not hide the others.
+            if let Ok(status) = RepoStatus::load(dir, root) {
+                changes.repo = true;
+                changes.absorb(root, &status, &nested_rel);
+            }
+        }
+        changes.rebuild();
         changes
     }
 
@@ -307,19 +366,17 @@ impl GitChanges {
         !self.entries.is_empty()
     }
 
-    fn absorb(
-        &mut self,
-        root: &Path,
-        text: &str,
-        prefix: &Path,
-        staged_stats: &HashMap<PathBuf, (usize, usize)>,
-        unstaged_stats: &HashMap<PathBuf, (usize, usize)>,
-    ) {
-        let mut files: Vec<GitFile> = Vec::new();
-        self.branch = None;
-        for line in text.lines() {
-            if let Some(rest) = line.strip_prefix("## ") {
-                self.branch = parse_branch(rest);
+    /// Fold one repository's `git status` into the view.
+    ///
+    /// Paths are re-rooted twice: the repository answers in its own coordinates, and the
+    /// tree nests by the folder the panel is showing. A nested repository is offset by its
+    /// own path; the folder's own repository is offset by whatever `--show-prefix` says
+    /// (empty when the folder *is* the repository root).
+    fn absorb(&mut self, sidebar_root: &Path, status: &RepoStatus, nested: &[PathBuf]) {
+        let first = self.entries.len();
+        let mut parsed: Vec<GitFile> = Vec::new();
+        for line in status.text.lines() {
+            if line.strip_prefix("## ").is_some() {
                 continue;
             }
             if line.len() < 4 {
@@ -335,84 +392,176 @@ impl GitChanges {
                 raw = &raw[pos + 4..];
             }
             let raw = unquote(raw);
-            let rel = if prefix.as_os_str().is_empty() {
-                PathBuf::from(&raw)
-            } else {
-                match Path::new(&raw).strip_prefix(prefix) {
-                    Ok(stripped) => stripped.to_path_buf(),
-                    // Outside the folder the sidebar is rooted at — the editor is not
-                    // showing that folder, so it has no row to attach to.
-                    Err(_) => continue,
-                }
+            let in_repo = PathBuf::from(&raw);
+            // Empty prefix means "the repository root is this folder".
+            let Ok(rest) = in_repo.strip_prefix(&status.prefix) else {
+                // Outside the folder the sidebar is rooted at — the editor is not showing
+                // that folder, so it has no row to attach to.
+                continue;
             };
-            files.push(GitFile {
+            // A gitlink (submodule) row is the repository itself; its own changes are
+            // read as their own repository, so the opaque one-line row is dropped.
+            let rel = status.offset.join(rest);
+            if status.offset.as_os_str().is_empty() && nested.contains(&rel) {
+                continue;
+            }
+            parsed.push(GitFile {
                 rel,
+                repo: status.dir.clone(),
+                in_repo,
                 index,
                 worktree,
             });
         }
 
         // One entry per side, in the order the groups are drawn.
-        self.entries.clear();
         for staged in [true, false] {
-            for file in &files {
+            for file in &parsed {
                 let belongs = if staged {
                     file.staged()
                 } else {
                     file.unstaged()
                 };
-                if belongs {
-                    let stats = if staged { staged_stats } else { unstaged_stats };
-                    let (added, deleted) = match stats.get(&file.rel) {
-                        Some(&(a, d)) => (a, d),
-                        // An untracked file has no diff to count: every line is new.
-                        None if file.untracked() => (count_lines(&root.join(&file.rel)), 0),
-                        None => (0, 0),
-                    };
-                    self.entries.push(GitEntry {
-                        file: file.clone(),
-                        staged,
-                        added,
-                        deleted,
-                    });
+                if !belongs {
+                    continue;
                 }
+                let stats = if staged {
+                    &status.staged
+                } else {
+                    &status.unstaged
+                };
+                // `--numstat` speaks in repository coordinates, like the status text.
+                let key = file
+                    .in_repo
+                    .strip_prefix(&status.prefix)
+                    .unwrap_or(&file.in_repo);
+                let (added, deleted) = match stats.get(key) {
+                    Some(&(a, d)) => (a, d),
+                    // An untracked file has no diff to count: every line is new.
+                    None if file.untracked() => (count_lines(&sidebar_root.join(&file.rel)), 0),
+                    None => (0, 0),
+                };
+                self.entries.push(GitEntry {
+                    file: file.clone(),
+                    staged,
+                    added,
+                    deleted,
+                });
             }
         }
-        self.rebuild();
+
+        let branch = parse_branch_of(&status.text);
+        let count = self.entries.len() - first;
+        if self.branch.is_none() {
+            self.branch.clone_from(&branch);
+        }
+        let name = if status.offset.as_os_str().is_empty() {
+            sidebar_root
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or_else(|| ".".to_string())
+        } else {
+            status.offset.display().to_string()
+        };
+        self.repos.push(GitRepo {
+            rel: status.offset.clone(),
+            name,
+            dir: status.dir.clone(),
+            branch,
+            first,
+            count,
+        });
     }
 
-    /// Rebuild the tree: node 0 and node 1 are the two group headers, everything else
-    /// nests under the one it belongs to. Sorted directories-first, like the explorer.
+    /// Which repository an entry belongs to (its index in [`GitChanges::repos`]).
+    fn repo_of(&self, entry: usize) -> Option<usize> {
+        self.repos
+            .iter()
+            .position(|repo| entry >= repo.first && entry < repo.first + repo.count)
+    }
+
+    /// Rebuild the tree. With one repository the two group headers sit at the top, where
+    /// they always were. With more than one, each repository gets a header and the groups
+    /// nest under it — "Staged / Changes" alone would not say *whose* changes.
+    ///
+    /// Sorted directories-first, like the explorer; the groups keep their order (Staged
+    /// before Changes) because the read order is the meaning.
     fn rebuild(&mut self) {
         self.nodes.clear();
         self.expanded.clear();
-        for group in [GitGroup::Staged, GitGroup::Unstaged] {
-            let idx = self.nodes.len();
-            self.nodes.push(GitNode {
-                name: group.label().to_string(),
-                is_dir: true,
-                depth: 0,
-                parent: None,
-                children: Vec::new(),
-                file: None,
-                group: Some(group),
-            });
-            self.expanded.insert(idx);
+        let with_changes = self.repos.iter().filter(|r| r.count > 0).count();
+        let multi = with_changes > 1;
+        let mut groups: HashMap<(usize, bool), usize> = HashMap::new();
+
+        for (repo_idx, repo) in self.repos.iter().enumerate() {
+            if repo.count == 0 {
+                continue;
+            }
+            let header = if multi {
+                let idx = self.nodes.len();
+                self.nodes.push(GitNode {
+                    name: repo.name.clone(),
+                    is_dir: true,
+                    depth: 0,
+                    parent: None,
+                    children: Vec::new(),
+                    file: None,
+                    group: None,
+                    repo: Some(repo_idx),
+                });
+                self.expanded.insert(idx);
+                Some(idx)
+            } else {
+                None
+            };
+            let entries = &self.entries[repo.first..repo.first + repo.count];
+            for group in [GitGroup::Staged, GitGroup::Unstaged] {
+                if !entries.iter().any(|e| e.staged == group.staged()) {
+                    continue;
+                }
+                let idx = self.nodes.len();
+                let depth = header.map(|h| self.nodes[h].depth + 1).unwrap_or(0);
+                self.nodes.push(GitNode {
+                    name: group.label().to_string(),
+                    is_dir: true,
+                    depth,
+                    parent: header,
+                    children: Vec::new(),
+                    file: None,
+                    group: Some(group),
+                    repo: Some(repo_idx),
+                });
+                self.expanded.insert(idx);
+                if let Some(header) = header {
+                    self.nodes[header].children.push(idx);
+                }
+                groups.insert((repo_idx, group.staged()), idx);
+            }
         }
-        let staged_root = 0usize;
-        let unstaged_root = 1usize;
 
         let mut index_of: HashMap<(usize, PathBuf), usize> = HashMap::new();
-        let entries: Vec<(usize, PathBuf)> = self
-            .entries
-            .iter()
-            .enumerate()
-            .map(|(i, e)| (i, e.file.rel.clone()))
-            .collect();
-
-        for (entry_idx, rel) in entries {
+        for entry_idx in 0..self.entries.len() {
             let staged = self.entries[entry_idx].staged;
-            let root = if staged { staged_root } else { unstaged_root };
+            let Some(repo_idx) = self.repo_of(entry_idx) else {
+                continue;
+            };
+            // Nested by the path *inside* the repository when that repository has its own
+            // header row — repeating the folder name under it would nest "a/a/x.txt". A
+            // lone nested repository has no header, so its folder stays in the path
+            // ("project/x.txt"): the row must say where the file is.
+            let rel = if multi {
+                self.entries[entry_idx]
+                    .file
+                    .rel
+                    .strip_prefix(&self.repos[repo_idx].rel)
+                    .map(Path::to_path_buf)
+                    .unwrap_or_else(|_| self.entries[entry_idx].file.rel.clone())
+            } else {
+                self.entries[entry_idx].file.rel.clone()
+            };
+            let Some(&root) = groups.get(&(repo_idx, staged)) else {
+                continue;
+            };
             let parts: Vec<String> = rel
                 .components()
                 .map(|c| c.as_os_str().to_string_lossy().to_string())
@@ -440,6 +589,7 @@ impl GitChanges {
                     children: Vec::new(),
                     file: if last { Some(entry_idx) } else { None },
                     group: None,
+                    repo: Some(repo_idx),
                 });
                 self.nodes[cur].children.push(idx);
                 // Directories start open: a change list is read at a glance.
@@ -456,10 +606,17 @@ impl GitChanges {
             .iter()
             .map(|n| (!n.is_dir, n.name.to_lowercase()))
             .collect();
-        for node in &mut self.nodes {
-            let mut children = std::mem::take(&mut node.children);
+        for i in 0..self.nodes.len() {
+            // A repository header keeps the order it was built in (Staged, then Changes).
+            if self.nodes[i].repo.is_some()
+                && self.nodes[i].group.is_none()
+                && self.nodes[i].parent.is_none()
+            {
+                continue;
+            }
+            let mut children = std::mem::take(&mut self.nodes[i].children);
             children.sort_by(|&a, &b| keys[a].cmp(&keys[b]));
-            node.children = children;
+            self.nodes[i].children = children;
         }
         self.clamp_selection();
     }
@@ -469,21 +626,10 @@ impl GitChanges {
     pub fn visible(&self) -> Vec<usize> {
         let mut out = Vec::with_capacity(self.nodes.len());
         for (idx, node) in self.nodes.iter().enumerate() {
-            let Some(group) = node.group else { continue };
-            let count = if group.staged() {
-                self.staged_count()
-            } else {
-                self.unstaged_count()
-            };
-            if count == 0 {
+            if node.parent.is_some() {
                 continue;
             }
-            out.push(idx);
-            if self.expanded.contains(&idx) {
-                for &child in &node.children {
-                    self.collect_visible(child, &mut out);
-                }
-            }
+            self.collect_visible(idx, &mut out);
         }
         out
     }
@@ -498,24 +644,16 @@ impl GitChanges {
         }
     }
 
-    /// Changed files under `idx` (the count beside a group or directory row).
+    /// Changed files under `idx` (the count beside a repository, group or directory row).
     pub fn count_under(&self, idx: usize) -> usize {
-        if let Some(group) = self.nodes[idx].group {
-            return if group.staged() {
-                self.staged_count()
-            } else {
-                self.unstaged_count()
-            };
+        if !self.nodes[idx].is_dir {
+            return 1;
         }
-        let mut n = 0;
-        for &child in &self.nodes[idx].children {
-            if self.nodes[child].is_dir {
-                n += self.count_under(child);
-            } else {
-                n += 1;
-            }
-        }
-        n
+        self.nodes[idx]
+            .children
+            .iter()
+            .map(|&child| self.count_under(child))
+            .sum()
     }
 
     /// `(added, deleted)` lines under a group or directory node.
@@ -716,29 +854,157 @@ fn count_lines(path: &Path) -> usize {
     }
 }
 
+/// One `git status` read, in the terms the view needs: which repository answered, where
+/// it sits relative to the sidebar root, and the counts of both sides.
+struct RepoStatus {
+    /// Absolute repository root — what `git -C` gets.
+    dir: PathBuf,
+    /// Where `dir` sits relative to the sidebar root. Empty when the folder is the
+    /// repository (or lives inside it, which `prefix` already accounts for).
+    offset: PathBuf,
+    /// Path from the repository root to the folder (`git rev-parse --show-prefix`).
+    prefix: PathBuf,
+    text: String,
+    staged: HashMap<PathBuf, (usize, usize)>,
+    unstaged: HashMap<PathBuf, (usize, usize)>,
+}
+
+impl RepoStatus {
+    /// Read `dir`, asked on behalf of a panel rooted at `sidebar_root`.
+    fn load(dir: &Path, sidebar_root: &Path) -> Result<Self, String> {
+        let (text, prefix, toplevel) = git_status(dir)?;
+        // The counts come from `git diff --numstat`, one call per side: the porcelain
+        // status says *that* a file changed, never how much.
+        let staged = numstat(&toplevel, &prefix, true);
+        let unstaged = numstat(&toplevel, &prefix, false);
+        // A nested repository is offset by its path; the root's own repository (or the
+        // ancestor it lives in) is not offset at all — `prefix` does that work.
+        let offset = if toplevel == sidebar_root {
+            PathBuf::new()
+        } else {
+            toplevel
+                .strip_prefix(sidebar_root)
+                .map(|rel| rel.to_path_buf())
+                .unwrap_or_default()
+        };
+        Ok(Self {
+            dir: toplevel,
+            offset,
+            prefix,
+            text,
+            staged,
+            unstaged,
+        })
+    }
+}
+
 /// `git status --porcelain=v1 -b -uall`, plus the path from the repository root to
-/// `root` (empty at the top). Porcelain paths are always repository-relative, so the
-/// prefix is what turns them into rows the sidebar can nest.
-fn git_status(root: &Path) -> Result<(String, PathBuf), String> {
+/// `dir` (empty at the top) and the repository root itself. Porcelain paths are always
+/// repository-relative, so the prefix is what turns them into rows the sidebar can nest.
+fn git_status(dir: &Path) -> Result<(String, PathBuf, PathBuf), String> {
     let out = Command::new("git")
         .arg("-C")
-        .arg(root)
+        .arg(dir)
         .args(["status", "--porcelain=v1", "-b", "-uall"])
         .output()
         .map_err(|e| format!("git not available: {e}"))?;
     if !out.status.success() {
         return Err(String::from_utf8_lossy(&out.stderr).trim().to_string());
     }
-    let prefix = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args(["rev-parse", "--show-prefix"])
-        .output()
-        .ok()
-        .filter(|o| o.status.success())
-        .map(|o| PathBuf::from(String::from_utf8_lossy(&o.stdout).trim_end()))
-        .unwrap_or_default();
-    Ok((String::from_utf8_lossy(&out.stdout).into_owned(), prefix))
+    let rev = |arg: &str| {
+        Command::new("git")
+            .arg("-C")
+            .arg(dir)
+            .args(["rev-parse", arg])
+            .output()
+            .ok()
+            .filter(|o| o.status.success())
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim_end().to_string())
+    };
+    let prefix = rev("--show-prefix").unwrap_or_default();
+    let toplevel = rev("--show-toplevel").unwrap_or_else(|| dir.display().to_string());
+    Ok((
+        String::from_utf8_lossy(&out.stdout).into_owned(),
+        PathBuf::from(prefix),
+        PathBuf::from(toplevel),
+    ))
+}
+
+/// Directories never worth walking into while looking for nested repositories: build
+/// output, package caches and tool state hold thousands of entries and never a project.
+const NESTED_SKIP: &[&str] = &[
+    "node_modules",
+    "target",
+    "dist",
+    "build",
+    "out",
+    "coverage",
+    "vendor",
+    "__pycache__",
+    ".venv",
+    "venv",
+];
+
+/// How deep the search for nested repositories goes, how many it will report, and how
+/// many folders it will look at while doing so. A folder can contain a repository at any
+/// depth, but a change list is not worth a full disk walk.
+const NESTED_MAX_DEPTH: usize = 3;
+const NESTED_MAX_REPOS: usize = 6;
+const NESTED_MAX_DIRS: usize = 2_000;
+
+/// Every repository nested under `root` — a submodule (its `.git` is a file), a vendored
+/// clone, or the several projects of a workspace folder.
+///
+/// The walk stops at each repository it finds: what is inside a repository belongs to that
+/// repository's own status. Hidden folders are skipped (`.git` itself, `.cache`, …), and
+/// so are build and package directories, so a `node_modules` never costs a stat storm.
+fn nested_repos(root: &Path) -> Vec<PathBuf> {
+    let mut found = Vec::new();
+    let mut queue = vec![(root.to_path_buf(), 0usize)];
+    let mut visited = 0usize;
+    while let Some((dir, depth)) = queue.pop() {
+        if found.len() >= NESTED_MAX_REPOS || visited >= NESTED_MAX_DIRS {
+            break;
+        }
+        let Ok(entries) = std::fs::read_dir(&dir) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            if found.len() >= NESTED_MAX_REPOS || visited >= NESTED_MAX_DIRS {
+                break;
+            }
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            // Symlinks are skipped: following them can leave the folder entirely.
+            if !file_type.is_dir() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().to_string();
+            if name == ".git" || NESTED_SKIP.contains(&name.as_str()) {
+                continue;
+            }
+            let path = entry.path();
+            visited += 1;
+            if path.join(".git").exists() {
+                found.push(path);
+                continue;
+            }
+            if name.starts_with('.') || depth + 1 >= NESTED_MAX_DEPTH {
+                continue;
+            }
+            queue.push((path, depth + 1));
+        }
+    }
+    found.sort();
+    found
+}
+
+/// The branch line of a porcelain status (`## main...origin/main`).
+fn parse_branch_of(text: &str) -> Option<String> {
+    text.lines()
+        .find_map(|line| line.strip_prefix("## "))
+        .and_then(parse_branch)
 }
 
 fn parse_branch(rest: &str) -> Option<String> {
@@ -799,6 +1065,10 @@ pub struct Sidebar {
     pub hover_tab: Option<SidebarTab>,
     /// When the pointer last landed on a row — the hover fade counts from here.
     pub hover_at: Option<std::time::Instant>,
+    /// The wheel (or a scrollbar drag) moved the viewport away from the selection. While
+    /// this is set, the renderer leaves the offset alone — a list that snaps back to the
+    /// selected row would undo every wheel notch.
+    pub scroll_parked: bool,
 }
 
 impl Sidebar {
@@ -825,6 +1095,7 @@ impl Sidebar {
             hover: None,
             hover_tab: None,
             hover_at: None,
+            scroll_parked: false,
         }
     }
 
@@ -866,13 +1137,16 @@ mod tests {
             repo: true,
             ..Default::default()
         };
-        changes.absorb(
-            root,
-            text,
-            Path::new(prefix),
-            &HashMap::new(),
-            &HashMap::new(),
-        );
+        let read = RepoStatus {
+            dir: root.to_path_buf(),
+            offset: PathBuf::new(),
+            prefix: Path::new(prefix).to_path_buf(),
+            text: text.to_string(),
+            staged: HashMap::new(),
+            unstaged: HashMap::new(),
+        };
+        changes.absorb(root, &read, &[]);
+        changes.rebuild();
         changes
     }
 
@@ -1011,8 +1285,19 @@ mod tests {
         );
         let ui = changes.nodes.iter().position(|n| n.name == "ui").unwrap();
         assert_eq!(changes.count_under(ui), 2);
-        assert_eq!(changes.count_under(0), 0, "Staged kosong");
-        assert_eq!(changes.count_under(1), 4, "Changes berisi 4");
+        assert!(
+            !changes
+                .nodes
+                .iter()
+                .any(|n| n.group == Some(GitGroup::Staged)),
+            "Staged kosong: tidak ada nodenya"
+        );
+        let unstaged = changes
+            .nodes
+            .iter()
+            .position(|n| n.group == Some(GitGroup::Unstaged))
+            .unwrap();
+        assert_eq!(changes.count_under(unstaged), 4, "Changes berisi 4");
     }
 
     #[test]
@@ -1176,6 +1461,184 @@ mod tests {
             "untracked: semua baris baru"
         );
         assert_eq!(changes.entries.len(), 2);
+    }
+
+    /// A repository inside the folder. `git status` in the outer repo only shows one
+    /// opaque row for it (and, if it is ignored, nothing at all) — the panel reads it as
+    /// its own repository so its changes are readable.
+    #[test]
+    fn a_nested_repository_is_read_as_its_own() {
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-nested-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path();
+        init_repo(root);
+        std::fs::write(root.join("top.txt"), "changed\n").unwrap();
+
+        let sub = root.join("sub");
+        std::fs::create_dir_all(&sub).unwrap();
+        init_repo(&sub);
+        std::fs::write(sub.join("inner.txt"), "one\ntwo\n").unwrap();
+        std::fs::write(sub.join("fresh.txt"), "new\n").unwrap();
+
+        let changes = GitChanges::load(root);
+        let inner = changes
+            .entries
+            .iter()
+            .find(|e| e.file.rel == Path::new("sub/inner.txt"))
+            .expect("berkas di repo nested");
+        assert_eq!(inner.added, 2, "untracked: semua baris baru");
+        assert_eq!(
+            inner.file.repo,
+            std::fs::canonicalize(&sub).unwrap(),
+            "git harus ditanya di repo nested"
+        );
+        assert_eq!(
+            inner.file.in_repo,
+            Path::new("inner.txt"),
+            "jalur di dalam repo, bukan di dalam root"
+        );
+        // The outer repo's `?? sub/` shadow row must not also appear.
+        assert!(
+            !changes
+                .entries
+                .iter()
+                .any(|e| e.file.rel == Path::new("sub")),
+            "baris bayangan repo nested dibuang"
+        );
+        assert_eq!(changes.count(), 3, "top.txt + dua berkas di sub");
+        assert_eq!(changes.repos.len(), 2);
+    }
+
+    /// With more than one repository the groups nest under a header per repository, so
+    /// "Staged Changes" can say whose it is.
+    #[test]
+    fn several_repositories_get_a_header_each() {
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-multi-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path();
+        init_repo(root);
+        std::fs::write(root.join("top.txt"), "changed\n").unwrap();
+        let a = root.join("a");
+        let b = root.join("b");
+        std::fs::create_dir_all(&a).unwrap();
+        std::fs::create_dir_all(&b).unwrap();
+        for dir in [&a, &b] {
+            init_repo(dir);
+            std::fs::write(dir.join("x.txt"), "one\n").unwrap();
+        }
+
+        let changes = GitChanges::load(root);
+        let names = names(&changes);
+        let folder = root.file_name().unwrap().to_string_lossy().to_string();
+        assert_eq!(
+            names,
+            vec![
+                folder.as_str(),
+                "Changes",
+                "top.txt",
+                "a",
+                "Changes",
+                "x.txt",
+                "b",
+                "Changes",
+                "x.txt",
+            ],
+            "satu header per repo, grup di bawahnya"
+        );
+        let repo_a = changes.nodes.iter().position(|n| n.name == "a").unwrap();
+        assert_eq!(changes.count_under(repo_a), 1, "satu perubahan di a");
+        assert_eq!(
+            changes.nodes[repo_a].depth, 0,
+            "header repo sejajar dengan root"
+        );
+        let group_a = changes.nodes[repo_a].children[0];
+        assert_eq!(changes.nodes[group_a].group, Some(GitGroup::Unstaged));
+        assert_eq!(changes.nodes[group_a].depth, 1, "grup masuk satu tingkat");
+    }
+
+    /// One repository is drawn exactly as before: no extra header row.
+    #[test]
+    fn a_single_repository_has_no_repository_header() {
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-single-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path();
+        init_repo(root);
+        std::fs::write(root.join("a.txt"), "one\n").unwrap();
+        let changes = GitChanges::load(root);
+        assert_eq!(names(&changes), vec!["Changes", "a.txt"]);
+    }
+
+    /// A folder that is not a repository but holds one still gets a change list.
+    #[test]
+    fn a_workspace_folder_reads_its_nested_repository() {
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-workspace-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path();
+        let project = root.join("project");
+        std::fs::create_dir_all(&project).unwrap();
+        init_repo(&project);
+        std::fs::write(project.join("x.txt"), "one\n").unwrap();
+
+        let changes = GitChanges::load(root);
+        assert!(changes.repo, "repo ditemukan");
+        assert_eq!(changes.count(), 1);
+        assert_eq!(changes.entries[0].file.rel, Path::new("project/x.txt"));
+        assert_eq!(names(&changes), vec!["Changes", "project", "x.txt"]);
+    }
+
+    /// Build directories and hidden state are never walked: a `node_modules` full of
+    /// dependencies must not cost a stat storm, let alone a `git status` per package.
+    #[test]
+    fn the_nested_search_skips_build_and_hidden_directories() {
+        let tmp = tempfile::Builder::new()
+            .prefix("cozy-nested-skip-")
+            .tempdir()
+            .unwrap();
+        let root = tmp.path();
+        for name in ["node_modules/pkg", ".cache/tool", "target/debug"] {
+            let dir = root.join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            init_repo(&dir);
+        }
+        let real = root.join("apps/web");
+        std::fs::create_dir_all(&real).unwrap();
+        init_repo(&real);
+
+        let found = nested_repos(root);
+        assert_eq!(found, vec![real], "hanya repo sungguhan yang ditemukan");
+    }
+
+    /// Run `git init` and one commit, so the folder is a repository with a HEAD.
+    fn init_repo(dir: &Path) {
+        use std::process::Command as Cmd;
+        let run = |args: &[&str]| {
+            let out = Cmd::new("git")
+                .args(args)
+                .current_dir(dir)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?} gagal");
+        };
+        run(&["init", "-q", "."]);
+        std::fs::write(dir.join(".keep"), "").unwrap();
+        run(&["add", "-A"]);
+        run(&[
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "init",
+        ]);
     }
 
     #[test]

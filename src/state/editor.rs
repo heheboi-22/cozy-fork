@@ -275,6 +275,22 @@ pub struct EditorState {
     /// Columns scrolled off to the left. Only meaningful with soft wrap **off**: a wrapped
     /// line has nothing to scroll horizontally, so the offset is held at 0 there.
     pub scroll_x: usize,
+    /// The content height the scrollbar drew last frame, in rows (soft wrap counted), and
+    /// the window it was compared against. The drag handler maps a pointer row back to an
+    /// offset with these, so it sees exactly the bar the user grabbed.
+    pub scrollbar_total: usize,
+    pub scrollbar_viewport: usize,
+    /// Which scrollbar the pointer is holding, if any.
+    pub scroll_drag: Option<ScrollDrag>,
+}
+
+/// A scrollbar the pointer is dragging. The sidebar and the text have separate bars, and
+/// the text has two axes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScrollDrag {
+    Sidebar,
+    EditorVertical,
+    EditorHorizontal,
 }
 
 pub(crate) struct EditorStateInit {
@@ -573,6 +589,9 @@ impl EditorState {
             file_diff: None,
             scroll_parked: false,
             scroll_x: 0,
+            scrollbar_total: 0,
+            scrollbar_viewport: 0,
+            scroll_drag: None,
         }
         .with_recovery_offer()
         // ⭐ 設定の苦情も**画面へ**（`eprintln!` は TUI の絵を壊す・`#2`）。
@@ -850,6 +869,15 @@ impl EditorState {
             self.scroll_x = col + 1 - width;
         }
         self.scroll_x = self.scroll_x.min(max);
+    }
+
+    /// The furthest row the window can start on. Scrollbar dragging clamps to this so a
+    /// grab cannot park the view past the end of the buffer.
+    pub fn max_scroll_offset(&self) -> usize {
+        self.buffer
+            .lines
+            .len()
+            .saturating_sub(self.page_size.max(1))
     }
 
     /// The furthest column this window can be scrolled to (the widest visible line).

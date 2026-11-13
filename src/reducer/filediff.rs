@@ -13,14 +13,22 @@ use crate::state::diff::{FileDiffView, load_file_diff};
 use crate::sidebar::GitEntry;
 
 /// Open `entry`'s diff. The panel stays up, so the next change is one click away.
+///
+/// `git` is asked in the entry's own repository and with that repository's path — a change
+/// inside a nested repository is invisible to the repository above it.
 pub fn open(editor: &mut EditorState, entry: &GitEntry) -> EventResult {
     let root = editor
         .sidebar
         .as_ref()
         .map(|s| s.root.clone())
         .unwrap_or_else(|| editor._working_dir.clone());
+    let repo = if entry.file.repo.as_os_str().is_empty() {
+        &root
+    } else {
+        &entry.file.repo
+    };
     let untracked = entry.untracked();
-    match load_file_diff(&root, &entry.file.rel, entry.staged, untracked) {
+    match load_file_diff(repo, &entry.file.in_repo, entry.staged, untracked) {
         Ok(rows) => {
             let view = FileDiffView::build(&entry.file.rel, entry.staged, rows);
             let title = view.title.clone();

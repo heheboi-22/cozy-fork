@@ -69,6 +69,28 @@ pub fn render_sidebar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
         height: inner.height.saturating_sub(2),
     };
 
+    // A bar costs the tree its last column, and only when there is something to scroll:
+    // the panel is narrow enough without a permanent empty column.
+    let rows_total = match sidebar.tab {
+        SidebarTab::Files => sidebar.explorer.visible_nodes().len(),
+        SidebarTab::Git => sidebar.git.visible().len(),
+    };
+    let show_bar = rows_total > body.height as usize && body.width >= 6;
+    let bar = show_bar.then(|| Rect {
+        x: body.right() - 1,
+        y: body.y,
+        width: 1,
+        height: body.height,
+    });
+    let body = if show_bar {
+        Rect {
+            width: body.width - 1,
+            ..body
+        }
+    } else {
+        body
+    };
+
     // Tab spans come back with the draw: the header knows where it put each word, so a
     // click does not have to measure text again.
     let tabs = render_header(sidebar, f, header);
@@ -82,6 +104,24 @@ pub fn render_sidebar(editor: &mut EditorState, f: &mut Frame, area: Rect) {
     editor.ui_hit.tabs = tabs;
     editor.ui_hit.body = Area::new(body.x, body.y, body.width, body.height);
     editor.ui_hit.rows = rows;
+    editor.ui_hit.sidebar_vbar = bar.map(|r| Area::new(r.x, r.y, r.width, r.height));
+
+    if let Some(bar) = bar
+        && let Some(sidebar) = editor.sidebar.as_ref()
+    {
+        let offset = match sidebar.tab {
+            SidebarTab::Files => sidebar.explorer.scroll,
+            SidebarTab::Git => sidebar.git.scroll,
+        };
+        crate::ui::render::scrollbar::draw_vertical(
+            f,
+            bar,
+            rows_total,
+            bar.height as usize,
+            offset,
+            editor.scroll_drag == Some(crate::state::ScrollDrag::Sidebar),
+        );
+    }
 }
 
 /// `≡ Files   ⑂ Git 3        ⑂ main` — two views, the change count, and the branch.
@@ -118,7 +158,7 @@ fn render_header(sidebar: &Sidebar, f: &mut Frame, area: Rect) -> Vec<(SidebarTa
     }
 
     if sidebar.tab == SidebarTab::Git
-        && let Some(branch) = sidebar.git.branch.as_deref()
+        && let Some(branch) = header_branch(sidebar)
     {
         let used: usize = spans.iter().map(|s| s.content.len()).sum();
         let room = (area.width as usize).saturating_sub(used + 4);
@@ -133,6 +173,16 @@ fn render_header(sidebar: &Sidebar, f: &mut Frame, area: Rect) -> Vec<(SidebarTa
 
     f.render_widget(Paragraph::new(Line::from(spans)), area);
     hit
+}
+
+/// What the header says about the repository. One repository: its branch (the useful
+/// fact). Several: how many, since no single branch speaks for the folder.
+fn header_branch(sidebar: &Sidebar) -> Option<String> {
+    let repos = sidebar.git.repos.iter().filter(|r| r.count > 0).count();
+    if repos > 1 {
+        return Some(format!("{repos} repos"));
+    }
+    sidebar.git.branch.clone()
 }
 
 fn marker(tab: SidebarTab) -> &'static str {
@@ -174,6 +224,7 @@ fn explorer_lines(sidebar: &mut Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec
             (sel, visible.len())
         },
         height,
+        sidebar.scroll_parked,
     );
     sidebar.explorer.scroll = scroll;
 
@@ -276,6 +327,7 @@ fn git_lines(sidebar: &mut Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<Side
             (sel, visible.len())
         },
         height,
+        sidebar.scroll_parked,
     );
     sidebar.git.scroll = scroll;
 
@@ -311,7 +363,34 @@ fn git_lines(sidebar: &mut Sidebar, area: Rect) -> (Vec<Line<'static>>, Vec<Side
         let node = &git.nodes[idx];
         let mut spans: Vec<Span<'static>> = Vec::new();
         let mut tail: Vec<Span<'static>> = Vec::new();
-        if let Some(group) = node.group {
+        if let Some(repo) = node
+            .repo
+            .filter(|_| node.group.is_none() && node.parent.is_none())
+        {
+            // "▾ zed-fork 3   +12 −4" — one header per repository when the folder holds
+            // several (nested clones, submodules, a workspace of projects).
+            let arrow = if git.expanded.contains(&idx) {
+                "▾ "
+            } else {
+                "▸ "
+            };
+            spans.push(Span::styled(format!("{arrow}⑂ "), Style::default().fg(DIM)));
+            let name = git
+                .repos
+                .get(repo)
+                .map(|r| r.name.clone())
+                .unwrap_or_else(|| node.name.clone());
+            spans.push(Span::styled(
+                name,
+                Style::default().fg(ACCENT).add_modifier(Modifier::BOLD),
+            ));
+            spans.push(Span::styled(
+                format!(" {}", git.count_under(idx)),
+                Style::default().fg(ACCENT),
+            ));
+            let (added, deleted) = git.totals_under(idx);
+            tail = counts(added, deleted, false);
+        } else if let Some(group) = node.group {
             // "▾ Staged Changes 2   +12 −3" — the two sections VS Code shows.
             let arrow = if git.expanded.contains(&idx) {
                 "▾ "
@@ -443,13 +522,17 @@ fn row(
 
 /// Where the viewport should start: the wheel's offset, but never so far that the
 /// selection is off screen (a keyboard move must not scroll the cursor away).
-fn keep_visible(scroll: usize, (sel, len): (usize, usize), height: usize) -> usize {
+fn keep_visible(scroll: usize, (sel, len): (usize, usize), height: usize, parked: bool) -> usize {
     if height == 0 || len == 0 {
         return 0;
     }
     // The last screenful: past this there would be blank rows below a short list.
     let max = len.saturating_sub(height);
     let mut scroll = scroll.min(max);
+    // Parked: the pointer put the view here, so the selection must not pull it back.
+    if parked {
+        return scroll;
+    }
     if sel < scroll {
         scroll = sel;
     } else if sel >= scroll + height {
@@ -649,6 +732,8 @@ mod render_tests {
         let mut sidebar = Sidebar::new(tmp.path());
         let entry = |rel: &str, index: char, worktree: char| GitEntry {
             file: GitFile {
+                repo: std::path::PathBuf::new(),
+                in_repo: std::path::PathBuf::new(),
                 rel: std::path::PathBuf::from(rel),
                 index,
                 worktree,
@@ -708,6 +793,8 @@ mod render_tests {
         }
         let entry = |rel: &str, index: char, worktree: char| GitEntry {
             file: GitFile {
+                repo: std::path::PathBuf::new(),
+                in_repo: std::path::PathBuf::new(),
                 rel: std::path::PathBuf::from(rel),
                 index,
                 worktree,

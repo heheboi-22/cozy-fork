@@ -17,14 +17,12 @@ fn clamp_cursor(frame_area: Rect, x: u16, y: u16) -> (u16, u16) {
     (x.min(max_x), y.min(max_y))
 }
 
-pub fn render_text_buffer(editor: &mut EditorState, f: &mut Frame, area: Rect) {
-    let viewport_height = area.height as usize;
-
+pub fn render_text_buffer(editor: &mut EditorState, f: &mut Frame, outer: Rect) {
     let show_line_numbers = editor.line_numbers_visible();
 
     let (line_number_width, line_number_digits) = if show_line_numbers {
         let max_lines = editor.buffer.lines.len();
-        let max_display = std::cmp::max(max_lines, editor.scroll_offset + viewport_height);
+        let max_display = std::cmp::max(max_lines, editor.scroll_offset + outer.height as usize);
         let digits = max_display.to_string().len();
         let width = (digits + 2) as u16;
         (width, digits)
@@ -37,6 +35,13 @@ pub fn render_text_buffer(editor: &mut EditorState, f: &mut Frame, area: Rect) {
     } else {
         0
     };
+
+    // The bars take a column (and, with wrap off, a row) away from the text. They are
+    // fitted against the width the text would have without them, so a bar appearing
+    // cannot make the content stop overflowing — the decision cannot oscillate.
+    editor.text_display_width = outer.width.saturating_sub(text_x_offset) as usize;
+    let (area, bars) = fit_scrollbars(editor, outer, text_x_offset);
+    let viewport_height = area.height as usize;
     let text_width = area.width.saturating_sub(text_x_offset) as usize;
 
     // Store text_display_width before adjust_scroll (which needs it for soft wrap)
@@ -45,6 +50,12 @@ pub fn render_text_buffer(editor: &mut EditorState, f: &mut Frame, area: Rect) {
     editor.ui_hit.text_area = crate::sidebar::Area::new(area.x, area.y, area.width, area.height);
     editor.ui_hit.text_x = area.x + text_x_offset;
     editor.ui_hit.text_width = text_width as u16;
+    editor.ui_hit.editor_vbar = bars
+        .vertical
+        .map(|r| crate::sidebar::Area::new(r.x, r.y, r.width, r.height));
+    editor.ui_hit.editor_hbar = bars
+        .horizontal
+        .map(|r| crate::sidebar::Area::new(r.x, r.y, r.width, r.height));
     editor.adjust_scroll(viewport_height);
     editor.adjust_hscroll();
 
@@ -259,6 +270,107 @@ pub fn render_text_buffer(editor: &mut EditorState, f: &mut Frame, area: Rect) {
             }
         }
     }
+
+    // ── scrollbars ────────────────────────────────────────────────────────────
+    //
+    // Drawn last, over the cells the text did not use: the bar is a position hint, and
+    // it must never be covered by whatever the last line put there.
+    let hot = editor.scroll_drag;
+    if let Some(bar) = bars.vertical {
+        crate::ui::render::scrollbar::draw_vertical(
+            f,
+            bar,
+            editor.scrollbar_total,
+            editor.scrollbar_viewport,
+            editor.scroll_offset,
+            hot == Some(crate::state::ScrollDrag::EditorVertical),
+        );
+    }
+    if let Some(bar) = bars.horizontal {
+        let viewport = text_width;
+        let total = viewport + editor.max_scroll_x();
+        crate::ui::render::scrollbar::draw_horizontal(
+            f,
+            bar,
+            total,
+            viewport,
+            editor.scroll_x,
+            hot == Some(crate::state::ScrollDrag::EditorHorizontal),
+        );
+    }
+}
+
+/// Which cells the text got, and where the two bars went (if they were needed).
+#[derive(Debug, Clone, Copy, Default)]
+struct Bars {
+    vertical: Option<Rect>,
+    horizontal: Option<Rect>,
+}
+
+/// Split `outer` into the text rectangle and the two scrollbars.
+///
+/// The order matters: the horizontal bar costs a row (which the vertical decision must
+/// see), and the vertical bar costs a column (which the horizontal decision must not
+/// see — otherwise a bar appearing could stop the content overflowing and the next frame
+/// would hide it again). Both are computed from the *narrower* candidate width for the
+/// same reason: narrowing only ever adds wrapped rows.
+fn fit_scrollbars(editor: &mut EditorState, outer: Rect, gutter: u16) -> (Rect, Bars) {
+    let mut text = outer;
+    let mut bars = Bars::default();
+    let width_no_v = outer.width.saturating_sub(gutter) as usize;
+    if width_no_v < 4 || outer.height < 2 {
+        editor.scrollbar_total = editor.buffer.lines.len();
+        editor.scrollbar_viewport = outer.height as usize;
+        return (text, bars);
+    }
+
+    // Horizontal: only when soft wrap is off (a wrapped line has nothing to the right).
+    let widest = widest_visible(editor);
+    if !editor.soft_wrap && widest > width_no_v && outer.height >= 3 {
+        text.height = text.height.saturating_sub(1);
+        bars.horizontal = Some(Rect {
+            x: outer.x + gutter,
+            y: text.bottom(),
+            width: outer.width.saturating_sub(gutter),
+            height: 1,
+        });
+    }
+
+    let (total, viewport) = content_rows(editor, text.height as usize);
+    editor.scrollbar_total = total;
+    editor.scrollbar_viewport = viewport;
+    if total > viewport && text.width >= 3 {
+        bars.vertical = Some(Rect {
+            x: text.right() - 1,
+            y: text.y,
+            width: 1,
+            height: text.height,
+        });
+        text.width = text.width.saturating_sub(1);
+    }
+    (text, bars)
+}
+
+/// The content height the bar speaks about.
+///
+/// It counts **buffer lines**, not visual rows, because that is the unit the view scrolls
+/// in: `scroll_offset` (the wheel, `Ctrl+D`, a scrollbar drag) is a line, and a bar
+/// measured in wrapped rows would promise a scroll to a row the view cannot start on.
+/// The ends still land exactly — first line at the top, last line at the bottom.
+fn content_rows(editor: &EditorState, height: usize) -> (usize, usize) {
+    (editor.buffer.lines.len().max(height), height)
+}
+
+/// The widest line in the window — the content width the horizontal bar speaks about.
+fn widest_visible(editor: &EditorState) -> usize {
+    let lines = &editor.buffer.lines;
+    let start = editor.scroll_offset.min(lines.len());
+    let end = (start + editor.page_size.max(1)).min(lines.len());
+    lines[start..end]
+        .iter()
+        .map(|line| crate::utils::unicode::str_display_width(line))
+        .max()
+        .unwrap_or(0)
 }
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -597,5 +709,71 @@ mod horizontal_scroll_tests {
         let (line, byte) = click_to_cursor(&editor, 2, 0).expect("hit");
         assert_eq!(line, 0);
         assert_eq!(byte, 7);
+    }
+}
+
+#[cfg(test)]
+mod scrollbar_layout_tests {
+    use super::*;
+    use crate::state::EditorState;
+    use crate::state::buffer::TextBuffer;
+
+    fn editor_with(lines: Vec<String>) -> EditorState {
+        let mut editor = EditorState::new(None);
+        editor.buffer = TextBuffer::from_lines(lines);
+        editor.page_size = 10;
+        editor.enter_mode(crate::state::EditorMode::Edit);
+        editor
+    }
+
+    /// A buffer that fits gets the whole rectangle and no bar at all — an empty track
+    /// would just eat a column.
+    #[test]
+    fn a_short_buffer_has_no_scrollbar() {
+        let mut editor = editor_with((0..5).map(|i| format!("line {i}")).collect());
+        let (text, bars) = fit_scrollbars(&mut editor, Rect::new(0, 0, 40, 10), 0);
+        assert_eq!(text, Rect::new(0, 0, 40, 10));
+        assert!(bars.vertical.is_none() && bars.horizontal.is_none());
+    }
+
+    /// A long one loses its last column to the bar, and the bar covers the window with
+    /// a thumb of the right size.
+    #[test]
+    fn a_long_buffer_reserves_the_last_column() {
+        let mut editor = editor_with((0..100).map(|i| format!("line {i}")).collect());
+        let (text, bars) = fit_scrollbars(&mut editor, Rect::new(0, 0, 40, 10), 0);
+        assert_eq!(text.width, 39, "satu kolom untuk scrollbar");
+        let bar = bars.vertical.expect("bar");
+        assert_eq!((bar.x, bar.y, bar.width, bar.height), (39, 0, 1, 10));
+        assert_eq!(editor.scrollbar_total, 100);
+        assert_eq!(editor.scrollbar_viewport, 10);
+    }
+
+    /// With soft wrap off and a line wider than the window, the last row goes to the
+    /// horizontal bar — the text keeps its last column, since nothing is there to read.
+    #[test]
+    fn a_wide_line_takes_the_bottom_row() {
+        let mut editor = editor_with(vec!["x".repeat(200), "second".to_string()]);
+        editor.soft_wrap = false;
+        editor.text_display_width = 40;
+        let (text, bars) = fit_scrollbars(&mut editor, Rect::new(0, 0, 40, 10), 0);
+        let bar = bars.horizontal.expect("bar horizontal");
+        assert_eq!((bar.x, bar.y, bar.width), (0, 9, 40));
+        assert_eq!(text.height, 9);
+        assert!(
+            bars.vertical.is_none(),
+            "dua baris tidak butuh bar vertikal"
+        );
+    }
+
+    /// The gutter stays put: the bars belong to the text, not to the line numbers.
+    #[test]
+    fn the_gutter_is_not_scrolled_by_the_bars() {
+        let mut editor = editor_with((0..100).map(|i| format!("line {i}")).collect());
+        let (text, bars) = fit_scrollbars(&mut editor, Rect::new(0, 0, 40, 10), 4);
+        assert_eq!(text.x, 0);
+        assert_eq!(text.width, 39, "40 kolom: bar memakai satu, gutter 4 tetap");
+        assert_eq!(text.width - 4, 35, "yang tersisa untuk teks");
+        assert_eq!(bars.vertical.unwrap().x, 39);
     }
 }
