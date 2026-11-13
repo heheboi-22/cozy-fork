@@ -36,6 +36,7 @@ pub enum EditorAction {
     ToggleFooter,
     DeleteLine,
     Paste,
+    CopySelection,
     EnterGoto,
     EnterGlide,
     ToggleMarkdownPreview,
@@ -283,6 +284,12 @@ fn edit_shortcuts() -> Vec<Shortcut> {
             KeyModifiers::CONTROL,
             EditorAction::Paste,
             "Ctrl+V Paste",
+        ),
+        sc(
+            KeyCode::Char('c'),
+            KeyModifiers::CONTROL,
+            EditorAction::CopySelection,
+            "Ctrl+C Copy",
         ),
     ]
 }
@@ -665,6 +672,7 @@ pub fn action_from_name(name: &str) -> Option<EditorAction> {
         "sidebar_files" => Some(EditorAction::SidebarFiles),
         "sidebar_git" => Some(EditorAction::SidebarGit),
         "paste" => Some(EditorAction::Paste),
+        "copy_selection" => Some(EditorAction::CopySelection),
         _ => None,
     }
 }

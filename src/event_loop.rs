@@ -208,11 +208,12 @@ fn run_loop<W: Write>(
                         }
                     }
                     editor.cursor_blink = true;
-                    // MVP: any action may have mutated the buffer; reparse on the
-                    // next render. Buffer mutations are not funneled through one
-                    // method, so a precise dirty signal (revision / InputEdit) is
-                    // a follow-up — see cozy-notes treesitter-integration.md.
-                    editor.highlighter.mark_dirty();
+                    // ⚠️ **No blanket `mark_dirty()` here.** A reparse is O(document)
+                    // (`join` + a full tree-sitter parse), and this loop runs for every
+                    // wheel notch and pointer move — that is what made scrolling slow
+                    // down as the file grew. The edits mark it themselves, at the one
+                    // place every mutation passes through (`reducer::helper::mark_modified`),
+                    // plus undo/redo and opening a file.
                     needs_redraw = if is_move {
                         editor.sidebar.as_ref().and_then(|s| s.hover) != hover_before
                     } else {

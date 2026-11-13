@@ -282,6 +282,14 @@ pub struct EditorState {
     pub scrollbar_viewport: usize,
     /// Which scrollbar the pointer is holding, if any.
     pub scroll_drag: Option<ScrollDrag>,
+    /// The text picked with the mouse, if any. Drawn as a band behind the characters and
+    /// copied on release (and by `Ctrl+C`).
+    pub selection: Option<Selection>,
+    /// The pointer is mid-drag on the text: motion extends the selection instead of
+    /// being ignored.
+    pub select_drag: bool,
+    /// Last press, for the double-click (word) test: when and where it happened.
+    pub last_press: Option<(std::time::Instant, (usize, usize))>,
 }
 
 /// A scrollbar the pointer is dragging. The sidebar and the text have separate bars, and
@@ -314,6 +322,42 @@ impl EditorStateInit {
             startup_time: Instant::now(),
             browse_folders: false,
         }
+    }
+}
+
+/// A span of text picked with the mouse: two buffer positions (line, byte), kept in the
+/// order the pointer crossed them.
+///
+/// 🚨 This is why the terminal can keep its mouse capture while the panel is up: cozy
+/// owns the drag and copies it itself, so plain (non-Shift) drag-select still works —
+/// it is cozy's selection, not the terminal's.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Selection {
+    /// Where the press landed — the end that stays put while the pointer moves.
+    pub anchor: (usize, usize),
+    /// Where the pointer is now.
+    pub head: (usize, usize),
+}
+
+impl Selection {
+    pub fn at(pos: (usize, usize)) -> Self {
+        Self {
+            anchor: pos,
+            head: pos,
+        }
+    }
+
+    /// `(start, end)` in reading order, start inclusive / end exclusive.
+    pub fn range(&self) -> ((usize, usize), (usize, usize)) {
+        if self.head < self.anchor {
+            (self.head, self.anchor)
+        } else {
+            (self.anchor, self.head)
+        }
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.anchor == self.head
     }
 }
 
@@ -592,6 +636,9 @@ impl EditorState {
             scrollbar_total: 0,
             scrollbar_viewport: 0,
             scroll_drag: None,
+            selection: None,
+            select_drag: false,
+            last_press: None,
         }
         .with_recovery_offer()
         // ⭐ 設定の苦情も**画面へ**（`eprintln!` は TUI の絵を壊す・`#2`）。
@@ -637,6 +684,8 @@ impl EditorState {
             self.redo_stack.push((self.buffer.clone(), self.cursor));
             self.buffer = buffer;
             self.cursor = cursor;
+            // The text under the highlighter is gone: reparse before drawing again.
+            self.highlighter.mark_dirty();
         }
     }
 
@@ -645,6 +694,7 @@ impl EditorState {
             self.undo_stack.push((self.buffer.clone(), self.cursor));
             self.buffer = buffer;
             self.cursor = cursor;
+            self.highlighter.mark_dirty();
         }
     }
 
@@ -871,6 +921,37 @@ impl EditorState {
         self.scroll_x = self.scroll_x.min(max);
     }
 
+    /// The text under the mouse selection, newline-joined, and how many buffer lines it
+    /// spans. `None` when nothing is selected (a plain click is not a copy).
+    pub fn selected_text(&self) -> Option<(String, usize)> {
+        let selection = self.selection?;
+        if selection.is_empty() {
+            return None;
+        }
+        let ((sy, sx), (ey, ex)) = selection.range();
+        let mut out = String::new();
+        let mut lines = 0usize;
+        for y in sy..=ey {
+            let Some(line) = self.buffer.lines.get(y) else {
+                break;
+            };
+            let from = if y == sy { clamp_boundary(line, sx) } else { 0 };
+            let to = if y == ey {
+                clamp_boundary(line, ex)
+            } else {
+                line.len()
+            };
+            if from < to {
+                out.push_str(&line[from..to]);
+            }
+            if y != ey {
+                out.push('\n');
+            }
+            lines += 1;
+        }
+        (!out.is_empty()).then_some((out, lines))
+    }
+
     /// The furthest row the window can start on. Scrollbar dragging clamps to this so a
     /// grab cannot park the view past the end of the buffer.
     pub fn max_scroll_offset(&self) -> usize {
@@ -970,4 +1051,14 @@ impl EditorState {
         }
         self.scroll_offset = new_offset;
     }
+}
+
+/// Clamp `i` down to the nearest char boundary of `s` (mouse positions come from display
+/// columns, and a wide char can put one past the start of a character).
+fn clamp_boundary(s: &str, i: usize) -> usize {
+    let mut i = i.min(s.len());
+    while i > 0 && !s.is_char_boundary(i) {
+        i -= 1;
+    }
+    i
 }

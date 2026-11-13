@@ -278,7 +278,9 @@ pub fn mouse_down(
         return EventResult::Continue;
     }
 
-    // 5. The buffer: put the cursor where the character was drawn.
+    // 5. The buffer: put the cursor where the character was drawn and start a selection.
+    //    The terminal's own drag-select is unavailable here (cozy has the mouse), so this
+    //    is what makes plain drag-to-copy work.
     if hit.text_area.contains(col, row)
         && matches!(
             editor.mode,
@@ -286,11 +288,11 @@ pub fn mouse_down(
         )
         && let Some((line, byte)) = crate::ui::render::body::click_to_cursor(editor, col, row)
     {
-        editor.cursor.place(line, byte);
         if let Some(sidebar) = editor.sidebar.as_mut() {
             sidebar.focused = false;
         }
         editor.status_message = None;
+        return crate::reducer::selection::press(editor, line, byte);
     }
     EventResult::Continue
 }
@@ -394,6 +396,10 @@ fn scroll_text_to_col(editor: &mut EditorState, col: u16) {
 
 /// Dragging the divider. The panel keeps a sane range no matter where the pointer is.
 pub fn mouse_drag(editor: &mut EditorState, col: u16, row: u16) -> EventResult {
+    // A selection drag owns the motion until the button comes up.
+    if editor.select_drag {
+        return crate::reducer::selection::drag(editor, col, row);
+    }
     match editor.scroll_drag {
         Some(crate::state::ScrollDrag::Sidebar) => {
             scroll_panel_to(editor, row);
@@ -427,7 +433,8 @@ pub fn mouse_drag(editor: &mut EditorState, col: u16, row: u16) -> EventResult {
 pub fn mouse_up(editor: &mut EditorState) -> EventResult {
     editor.sidebar_drag = false;
     editor.scroll_drag = None;
-    EventResult::Continue
+    // The end of a drag: copy what it selected. A click (no drag) copies nothing.
+    crate::reducer::selection::finish(editor)
 }
 
 /// The pointer moved. Hover is its own state: it never moves the selection and never
@@ -577,6 +584,57 @@ mod tests {
             editor.scroll_drag,
             Some(crate::state::ScrollDrag::EditorHorizontal)
         );
+    }
+
+    /// Press-and-drag over the text: the terminal cannot do it (cozy holds the mouse),
+    /// so cozy does — the band, and the copy when the button comes up.
+    #[test]
+    fn dragging_over_the_text_selects_and_copies_it() {
+        let (_tmp, mut editor) = editor_with_panel();
+        editor.buffer = crate::state::TextBuffer::from_lines(vec![
+            "hello world".to_string(),
+            "second line".to_string(),
+        ]);
+        // The text sits to the right of the panel, where a real frame puts it.
+        editor.ui_hit.text_area = Area::new(40, 0, 40, 10);
+        editor.ui_hit.text_x = 40;
+        editor.ui_hit.text_width = 40;
+        editor.page_size = 10;
+
+        // Press at column 2 of line 0, drag to column 5 of line 1, release.
+        let _ = mouse_down(&mut editor, MouseButton::Left, 42, 0);
+        assert!(editor.select_drag);
+        let _ = mouse_drag(&mut editor, 45, 1);
+        let _ = mouse_up(&mut editor);
+
+        assert!(!editor.select_drag, "lepas tombol mengakhiri drag");
+        assert_eq!(
+            editor.selected_text(),
+            Some(("llo world\nsecon".to_string(), 2))
+        );
+        assert_eq!(editor.cursor.y, 1, "kursor ikut ujung drag");
+        assert!(
+            editor
+                .status_message
+                .as_deref()
+                .is_some_and(|m| m.starts_with("Copied") || m.starts_with("Copy failed")),
+            "pesan copy: {:?}",
+            editor.status_message
+        );
+    }
+
+    /// A click (no drag) is not a copy — it only moves the cursor.
+    #[test]
+    fn a_plain_click_clears_the_selection_again() {
+        let (_tmp, mut editor) = editor_with_panel();
+        editor.buffer = crate::state::TextBuffer::from_lines(vec!["hello".to_string()]);
+        editor.ui_hit.text_area = Area::new(40, 0, 40, 10);
+        editor.ui_hit.text_x = 40;
+        editor.ui_hit.text_width = 40;
+        let _ = mouse_down(&mut editor, MouseButton::Left, 43, 0);
+        let _ = mouse_up(&mut editor);
+        assert!(editor.selection.is_none());
+        assert_eq!(editor.cursor.x, 3);
     }
 
     #[test]

@@ -12,6 +12,7 @@ pub mod insert;
 pub mod operator;
 pub mod replace;
 pub mod search;
+pub mod selection;
 pub mod sidebar;
 pub mod status;
 
@@ -349,6 +350,24 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         Action::Wheel(_) | Action::MouseScroll(..) | Action::MouseMove(..) | Action::MouseDrag(..)
     ) {
         editor.scroll_parked = false;
+    }
+
+    // The mouse selection belongs to the pointer: the next key starts something else.
+    // Copying is the one key the selection exists *for*, and a drag ends on its own
+    // (`MouseUp` copies before anything is cleared).
+    if !matches!(
+        action,
+        Action::CopySelection
+            | Action::MouseDown(..)
+            | Action::MouseDrag(..)
+            | Action::MouseMove(..)
+            | Action::MouseUp
+            | Action::MouseScroll(..)
+            | Action::Wheel(_)
+            | Action::HScroll(_)
+    ) {
+        editor.selection = None;
+        editor.select_drag = false;
     }
 
     // Dispatch to buffer reducer for editing actions
@@ -752,6 +771,7 @@ pub fn reduce(editor: &mut EditorState, action: Action) -> EventResult {
         },
         Action::BrowseExpandOrOpen => browse::expand_or_open(editor),
         Action::BrowseCollapseOrParent => browse::collapse_or_parent(editor),
+        Action::CopySelection => selection::copy(editor),
         Action::HScroll(delta) => {
             if matches!(
                 editor.mode,

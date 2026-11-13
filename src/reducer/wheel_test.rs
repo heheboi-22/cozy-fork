@@ -340,3 +340,56 @@ fn turning_wrap_on_clears_the_horizontal_offset() {
     assert!(editor.soft_wrap);
     assert_eq!(editor.scroll_x, 0);
 }
+
+// ── reparse budget ───────────────────────────────────────────────────────────
+//
+// A reparse is `lines.join("\n")` plus a tree-sitter parse from scratch, so it costs
+// the whole document. It used to run on **every action** (the event loop marked the
+// highlighter dirty unconditionally), which made scrolling slower as the file grew.
+
+/// Moving the view never asks for a reparse — not the wheel, not a key that only moves
+/// the cursor.
+#[test]
+fn scrolling_and_moving_never_reparse_the_document() {
+    let mut editor = EditorState::new(None);
+    editor.buffer = TextBuffer::from_lines((0..500).map(|i| format!("line {i}")).collect());
+    editor.page_size = 20;
+    editor.enter_mode(EditorMode::Edit);
+    // A frame: the dirty flag is spent once.
+    editor.highlighter.ensure(&editor.buffer.lines, 0..20);
+    assert!(
+        !editor.highlighter.is_dirty(),
+        "sudah bersih setelah satu frame"
+    );
+
+    reduce(&mut editor, Action::Wheel(5));
+    assert!(
+        !editor.highlighter.is_dirty(),
+        "wheel hanya menggeser jendela"
+    );
+    reduce(&mut editor, Action::MoveDown);
+    assert!(!editor.highlighter.is_dirty(), "j/k hanya menggeser kursor");
+    reduce(&mut editor, Action::PageDown);
+    assert!(!editor.highlighter.is_dirty(), "PgDn juga hanya menggeser");
+}
+
+/// ... but an edit does, so the colours are never drawn from a stale tree.
+#[test]
+fn editing_asks_for_a_reparse() {
+    let mut editor = EditorState::new(None);
+    editor.buffer = TextBuffer::from_lines(vec!["fn main() {}".to_string()]);
+    editor.enter_mode(EditorMode::Edit);
+    editor.highlighter.ensure(&editor.buffer.lines, 0..1);
+    assert!(!editor.highlighter.is_dirty());
+
+    reduce(&mut editor, Action::InsertChar('x'));
+    assert!(editor.highlighter.is_dirty(), "ketikan mengubah teks");
+    editor.highlighter.ensure(&editor.buffer.lines, 0..1);
+
+    reduce(&mut editor, Action::Enter);
+    assert!(editor.highlighter.is_dirty(), "baris baru juga");
+
+    editor.highlighter.ensure(&editor.buffer.lines, 0..2);
+    reduce(&mut editor, Action::Undo);
+    assert!(editor.highlighter.is_dirty(), "undo mengganti buffer");
+}

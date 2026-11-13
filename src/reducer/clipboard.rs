@@ -150,6 +150,7 @@ pub fn cut_line(editor: &mut EditorState) -> EventResult {
     set_register_linewise(editor, text.clone());
 
     editor.save_snapshot();
+    editor.highlighter.mark_dirty();
     editor.buffer.lines.remove(y);
     if editor.buffer.lines.is_empty() {
         editor.buffer.lines.push(String::new());

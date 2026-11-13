@@ -62,6 +62,13 @@ impl Highlighter {
         self.dirty = true;
     }
 
+    /// Whether the next `ensure` will reparse. Tests use it to pin the rule that reading
+    /// and scrolling must never ask for one — a reparse costs O(document).
+    #[cfg(test)]
+    pub(crate) fn is_dirty(&self) -> bool {
+        self.dirty
+    }
+
     /// Make sure the cache covers `visible`. Reparses only when the buffer is
     /// dirty; re-queries when the visible window moved.
     pub fn ensure(&mut self, lines: &[String], visible: Range<usize>) {

@@ -8,6 +8,11 @@ use ratatui::{
 
 use crate::state::{EditorMode, EditorState};
 use crate::utils::unicode::display_width_up_to;
+
+/// The band behind mouse-selected text. Dark theme: a deep blue that keeps the syntax
+/// colours readable; light theme: VS Code's own light selection.
+const SELECTION_DARK: Color = Color::Rgb(38, 79, 120);
+const SELECTION_LIGHT: Color = Color::Rgb(173, 214, 255);
 use crate::utils::wrap::{byte_at_visual_col, visual_row_count, wrap_chunks};
 
 /// Clamp cursor position to stay within the terminal buffer bounds.
@@ -406,6 +411,31 @@ fn render_line_range(
     } else {
         Style::default()
     };
+    let selection_color = if is_light {
+        SELECTION_LIGHT
+    } else {
+        SELECTION_DARK
+    };
+
+    // The span of *this* line the mouse selected, if any. Wrapped chunks draw different
+    // byte ranges of the same line; the `in_range` test below keeps them apart, so only
+    // the bytes are needed here.
+    let selected = editor.selection.and_then(|selection| {
+        if selection.is_empty() {
+            return None;
+        }
+        let ((sy, sx), (ey, ex)) = selection.range();
+        if y < sy || y > ey {
+            return None;
+        }
+        let from = if y == sy { sx.min(line_text.len()) } else { 0 };
+        let to = if y == ey {
+            ex.min(line_text.len())
+        } else {
+            line_text.len()
+        };
+        Some((from, to))
+    });
 
     let line_matches: Vec<(usize, usize)> = editor
         .search_matches
@@ -438,6 +468,14 @@ fn render_line_range(
             // theme's foreground/background; the search/yank overlays go on top.
             let mut final_style =
                 default_style.patch(editor.highlighter.style_at(y, byte_pos).unwrap_or_default());
+            // The mouse selection is a band behind the characters — under the search and
+            // yank highlights, which mean "look here" and must stay legible.
+            if let Some((from, to)) = selected
+                && byte_pos >= from
+                && byte_pos < to
+            {
+                final_style = final_style.bg(selection_color);
+            }
             // Yank flash (green): shown until the next keypress so you can see
             // what was just copied. A live search match still wins over it.
             if let Some(hl) = &editor.yank_highlight
@@ -473,7 +511,13 @@ fn render_line_range(
     }
 
     if !has_content {
-        spans.push(Span::styled(" ", default_style));
+        // An empty line inside the selection still shows the band, one cell wide.
+        let style = if selected.is_some() {
+            default_style.bg(selection_color)
+        } else {
+            default_style
+        };
+        spans.push(Span::styled(" ", style));
     }
 
     Line::from(spans)
@@ -775,5 +819,73 @@ mod scrollbar_layout_tests {
         assert_eq!(text.width, 39, "40 kolom: bar memakai satu, gutter 4 tetap");
         assert_eq!(text.width - 4, 35, "yang tersisa untuk teks");
         assert_eq!(bars.vertical.unwrap().x, 39);
+    }
+}
+
+#[cfg(test)]
+mod selection_render_tests {
+    use super::*;
+    use crate::state::EditorState;
+    use crate::state::buffer::TextBuffer;
+
+    fn line_with_selection(from: usize, to: usize) -> Vec<(String, Option<Color>)> {
+        let mut editor = EditorState::new(None);
+        editor.buffer = TextBuffer::from_lines(vec!["abcdef".to_string()]);
+        editor.enter_mode(EditorMode::Edit);
+        editor.selection = Some(crate::state::Selection {
+            anchor: (0, from),
+            head: (0, to),
+        });
+        render_line(&editor, 0)
+            .spans
+            .iter()
+            .map(|s| (s.content.to_string(), s.style.bg))
+            .collect()
+    }
+
+    /// The band covers exactly the selected characters — edge to edge, not just the text
+    /// colour of a `+`/`-` sign (the same rule the diff rows follow).
+    #[test]
+    fn the_selection_band_covers_the_selected_bytes() {
+        let spans = line_with_selection(2, 5);
+        for (i, (content, bg)) in spans.iter().enumerate() {
+            let inside = (2..5).contains(&i);
+            assert_eq!(
+                *bg == Some(SELECTION_DARK),
+                inside,
+                "span {i} ({content:?}) band={bg:?}"
+            );
+        }
+    }
+
+    /// Dragging backwards paints the same band as dragging forwards.
+    #[test]
+    fn a_backwards_selection_paints_the_same_band() {
+        assert_eq!(line_with_selection(5, 2), line_with_selection(2, 5));
+    }
+
+    /// An empty line inside the selection shows a one-cell band, so a copied blank line
+    /// is visible rather than invisible.
+    #[test]
+    fn a_selected_empty_line_shows_a_band() {
+        let mut editor = EditorState::new(None);
+        editor.buffer = TextBuffer::from_lines(vec!["".to_string()]);
+        editor.enter_mode(EditorMode::Edit);
+        editor.selection = Some(crate::state::Selection {
+            anchor: (0, 0),
+            head: (0, 0),
+        });
+        // A click (empty selection) draws nothing.
+        assert_eq!(render_line(&editor, 0).spans[0].style.bg, None);
+        // A real range over the empty line does.
+        editor.selection = Some(crate::state::Selection {
+            anchor: (0, 0),
+            head: (1, 0),
+        });
+        editor.buffer.lines.push("x".to_string());
+        assert_eq!(
+            render_line(&editor, 0).spans[0].style.bg,
+            Some(SELECTION_DARK)
+        );
     }
 }

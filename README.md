@@ -132,6 +132,12 @@ The panel is **mouse-first**:
   scroll's, and moving within the same row does not repaint
 - drag the panel's right border — resizes it (never past half the screen)
 - click in the text — the cursor goes where the character was drawn (soft wrap included)
+- **drag in the text — selects it and copies on release.** The band is drawn behind the
+  characters, double-click selects the word, `Ctrl+C` copies again, and any key clears it.
+  Because cozy holds the mouse while the panel is up, this is what makes plain
+  drag-to-copy work (the terminal's own selection needs Shift). The text goes to the
+  system clipboard, or — when there is none, such as over SSH — to the terminal itself
+  with `OSC 52`.
 
 ⚠️ While the panel is up the terminal hands the mouse to cozy, so the terminal's own
 drag-to-select needs **Shift**. Hiding the panel (`Alt+B` twice) gives plain drag-select

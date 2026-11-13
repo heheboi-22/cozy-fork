@@ -201,6 +201,7 @@ impl Keymap {
                 }
                 EditorAction::EnterGoto => return Some(Action::EnterMode(EditorMode::Goto)),
                 EditorAction::Paste => return Some(Action::PasteFromClipboard),
+                EditorAction::CopySelection => return Some(Action::CopySelection),
                 EditorAction::EnterGlide => return Some(Action::EnterMode(EditorMode::Glide)),
                 EditorAction::ToggleMarkdownPreview => {
                     if editor.mode != EditorMode::View {

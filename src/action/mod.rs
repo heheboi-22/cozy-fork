@@ -137,6 +137,10 @@ pub enum Action {
     /// Horizontal wheel: move the view left/right when soft wrap is off.
     HScroll(isize),
 
+    /// `Ctrl+C`: put the mouse selection on the system clipboard. The mouse already
+    /// copies on release; this is the deliberate repeat (and works after a double-click).
+    CopySelection,
+
     // Mouse. Positions are screen cells; the reducer resolves them against
     // `EditorState::ui_hit` (the rectangles the last frame drew).
     MouseDown(MouseButton, u16, u16),

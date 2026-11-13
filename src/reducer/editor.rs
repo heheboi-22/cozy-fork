@@ -689,6 +689,7 @@ pub fn apply_editor_event(editor: &mut EditorState, action: &Action) -> EventRes
         }
         Action::GlideOpenLine => {
             editor.save_snapshot();
+            editor.highlighter.mark_dirty();
             let y = editor.cursor.y;
             editor.buffer.lines.insert(y + 1, String::new());
             editor.cursor.y = y + 1;
@@ -699,6 +700,7 @@ pub fn apply_editor_event(editor: &mut EditorState, action: &Action) -> EventRes
         }
         Action::GlideOpenLineAbove => {
             editor.save_snapshot();
+            editor.highlighter.mark_dirty();
             let y = editor.cursor.y;
             editor.buffer.lines.insert(y, String::new());
             editor.cursor.x = 0;
